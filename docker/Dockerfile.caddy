@@ -1,0 +1,57 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+
+# Production web tier: compiles the React app to a static bundle, then bakes it
+# into the Caddy image that serves it.
+#
+# WHY THE FRONTEND LIVES IN THE CADDY IMAGE
+# In production there is no Vite dev server and no Node process at runtime — the
+# frontend is a directory of compiled files. Giving those files their own
+# container would mean a second process whose only job is to hand bytes to Caddy,
+# which already serves files. Baking them in makes the web tier a single
+# immutable artefact: what was built is exactly what is served, with no shared
+# volume that could go stale between a rebuild and a restart.
+#
+# BUILD CONTEXT IS THE REPOSITORY ROOT (see .dockerignore) because this build
+# needs both frontend/ and Caddyfile.prod.
+
+# --- stage 1: compile the React application -----------------------------------
+FROM node:20-alpine AS build
+
+WORKDIR /app
+
+# No package-lock.json exists in this repository, so `npm ci` is not usable.
+# NOTE: this means dependency versions are resolved at build time and are not
+# reproducible across builds. Committing a lockfile and switching to `npm ci` is
+# recommended before institute-wide rollout.
+COPY frontend/package.json ./
+RUN npm install
+
+COPY frontend/ ./
+
+# Produces /app/dist — hashed, minified assets. This is what replaces the Vite
+# dev server in production.
+RUN npm run build
+
+
+# --- stage 2: the server that will actually run -------------------------------
+FROM caddy:2-alpine
+
+COPY --from=build /app/dist /srv
+COPY Caddyfile.prod /etc/caddy/Caddyfile
+
+# Unprivileged runtime user. Caddy still needs to bind :80 and :443, which are
+# privileged ports — docker-compose.prod.yml grants NET_BIND_SERVICE for exactly
+# that and nothing else, which is far narrower than running the whole process as
+# root.
+#
+# /data holds the internally-issued TLS certificate and its private key, so it
+# must be writable by this user. Chowning here (rather than at runtime) means a
+# freshly created named volume inherits the correct ownership on first mount.
+RUN addgroup -g 1001 -S caddyuser \
+    && adduser -u 1001 -S caddyuser -G caddyuser \
+    && mkdir -p /data /config \
+    && chown -R caddyuser:caddyuser /data /config /srv
+
+USER caddyuser
+
+EXPOSE 80 443

@@ -1,0 +1,33 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+# Keeps secrets, history, tests and generated output out of the backend image.
+# Applies to BOTH build targets. Development is unaffected at runtime because
+# docker-compose.override.yml bind-mounts the host source over /app.
+
+# --- secrets: must never enter an image layer --------------------------------
+.env
+.env.*
+!.env.example
+
+# --- version control / editor -------------------------------------------------
+.git
+.gitignore
+.vscode
+.idea
+
+# --- python artefacts ---------------------------------------------------------
+**/__pycache__
+**/*.py[cod]
+.venv
+venv
+
+# --- tests (not shipped to production) ----------------------------------------
+**/tests.py
+**/test_*.py
+**/*_test.py
+.pytest_cache
+
+# --- generated evaluation output ----------------------------------------------
+experiment_results/
+
+# --- documentation ------------------------------------------------------------
+*.md

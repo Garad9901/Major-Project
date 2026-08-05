@@ -1,0 +1,42 @@
+[
+  {
+    "question": "How many credits is the Operating Systems course worth?",
+    "answer": "The Operating Systems course (CS420) is worth 4 credits."
+  },
+  {
+    "question": "What does the Database Systems course cover?",
+    "answer": "Database Systems (CS310) covers relational algebra, SQL, normalization, transactions, and indexing. It is worth 3 credits."
+  },
+  {
+    "question": "Which department offers the Organic Chemistry course?",
+    "answer": "Organic Chemistry I (CHEM210) is offered by the Chemistry department."
+  },
+  {
+    "question": "When was the English department established?",
+    "answer": "The English department (code ENG) was established in 1960."
+  },
+  {
+    "question": "Who teaches the Machine Learning Fundamentals course?",
+    "answer": "Machine Learning Fundamentals (CS501) is taught by Alan Turing, a Professor in the Computer Science department."
+  },
+  {
+    "question": "What is the tuition fee for the B.Tech Computer Science program?",
+    "answer": "The B.Tech Computer Science program has a tuition fee of 75000 for Fall 2026, plus a 10000 lab fee."
+  },
+  {
+    "question": "What are the prerequisites for Machine Learning Fundamentals?",
+    "answer": "Machine Learning Fundamentals (CS501) requires Linear Algebra (MATH201) as a prerequisite."
+  },
+  {
+    "question": "When is the final exam for Database Systems?",
+    "answer": "The final exam for Database Systems (CS310) is on December 12, 2026, from 9:00 AM to 12:00 PM."
+  },
+  {
+    "question": "What topics are covered in the Linear Algebra course?",
+    "answer": "Linear Algebra (MATH201) covers vector spaces, matrices, eigenvalues, and linear transformations. It is worth 4 credits."
+  },
+  {
+    "question": "How long is the M.Tech Computer Science program?",
+    "answer": "The M.Tech Computer Science program is a 2-year master's degree program in the Computer Science department."
+  }
+]

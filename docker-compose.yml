@@ -1,0 +1,308 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+
+# BASE stack — the services common to development and production.
+#
+# HOW THE THREE FILES FIT TOGETHER
+#   docker-compose.yml           this file: infrastructure, backend, sync_worker
+#   docker-compose.override.yml  development only; Compose loads it AUTOMATICALLY
+#   docker-compose.prod.yml      production only; must be named explicitly
+#
+#   Development:  docker compose up -d
+#                 -> base + override  (bind-mounted source, Vite dev server)
+#   Production:   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#                 -> base + prod      (no bind mounts, built image, gunicorn)
+#
+# WHY THE SPLIT EXISTS
+# Compose MERGES list-valued keys such as `volumes` across files rather than
+# replacing them — an override specifying `volumes: []` leaves the base mounts
+# in place. Verified empirically. A production override therefore cannot remove
+# a development bind mount, and the only reliable way to keep host source out of
+# the production containers is to declare those mounts in a file production never
+# loads. That is what docker-compose.override.yml is for.
+
+# Docker's default json-file log driver has NO size limit: a container that logs
+# steadily will grow its log file until the disk is full, which takes down every
+# service on the host, not just the noisy one. Every service references this.
+# 10 MB x 5 files = at most 50 MB per service.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    # Built rather than pulled so the server has a TLS certificate with the
+    # ownership and permissions Postgres insists on. See docker/Dockerfile.postgres
+    # for why the certificate cannot come from a bind mount.
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.postgres
+    restart: always
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/var/lib/postgresql/tls/server.crt
+      - -c
+      - ssl_key_file=/var/lib/postgresql/tls/server.key
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-college_rag}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Bound to localhost only — internal services are never exposed on the
+      # LAN. External access is exclusively through the Caddy HTTPS proxy.
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - college_rag_net
+    logging: *default-logging
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: always
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    healthcheck:
+      # The qdrant image contains no curl, wget or nc — only bash. This opens a
+      # raw TCP socket via bash's /dev/tcp and checks for a 200 on /healthz.
+      # Verified in-container, including a negative control against a closed
+      # port to confirm it actually reports failure.
+      # HTTP/1.0 needs no Host header, and the request line is emitted with two
+      # `echo`s rather than printf. That is deliberate: a "\n" inside a
+      # YAML double-quoted scalar is parsed by YAML as a real newline before the
+      # shell ever sees it, which silently breaks the request into fragments.
+      # Using echo keeps the command completely free of backslash escapes.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333; { echo 'GET /healthz HTTP/1.0'; echo; } >&3; grep -q '200 OK' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - college_rag_net
+    logging: *default-logging
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: always
+    environment:
+      # KEEP MODELS RESIDENT. This is the single largest latency factor in the
+      # whole system, by an order of magnitude.
+      #
+      # Ollama's default keep_alive is 5 MINUTES. After that it evicts the model
+      # from RAM, and the next question pays a full reload from disk. Measured
+      # on this machine, same question, same everything:
+      #
+      #     warm (models resident)   first token   6.96s    total   13.46s
+      #     cold (models evicted)    first token 225.69s    total  263.44s
+      #
+      # 19.6x slower. On a lightly-used server — which is exactly what a college
+      # assistant is outside peak hours — nearly EVERY question pays that cost,
+      # because five minutes of quiet is normal.
+      #
+      # -1 means never evict. The cost is RAM: the three models stay resident
+      # together (~7.7 GB), so OLLAMA_MEMORY_LIMIT must have room for them plus
+      # KV cache. See docker-compose.prod.yml.
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:--1}
+      # Ollama will not batch beyond this many requests at once. Kept at 1 to
+      # match LLM_MAX_CONCURRENCY: on CPU a second concurrent generation does not
+      # run in parallel, it just splits the same cores and slows both.
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+    volumes:
+      - ollama_data:/root/.ollama
+    # No host port published: Ollama is internal-only, reached by the backend
+    # and sync_worker over the docker network at http://ollama:11434. (Not
+    # publishing it also avoids colliding with a desktop Ollama app on the host.)
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - college_rag_net
+    logging: *default-logging
+
+  # One-shot helper: downloads the AI models into the shared ollama volume the
+  # first time the stack starts, so nobody has to run `ollama pull` by hand.
+  # On later starts the models are already cached, so this finishes instantly.
+  # It exits when done (not a long-running service), hence restart: "no".
+  #
+  # The download is ~5 GB on first run, so a transient network hiccup mid-pull
+  # is a real risk. The loop below retries each model up to 5 times (ollama
+  # resumes from cached layers, so a retry doesn't re-download what already
+  # landed) and only gives up — loudly — after that. Models are read from the
+  # same env vars the app uses, so switching models is a one-place change.
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5:7b}
+      # Usually a SMALLER model than LLM_MODEL: verification cannot stream and
+      # must read the whole answer plus all evidence, so on CPU it is the
+      # slowest step. Pulled here so a fresh server does not fail its first
+      # verification with "model not found". Empty (or equal to LLM_MODEL) is
+      # fine — the loop below skips blanks and re-pulling is a no-op.
+      VERIFICATION_MODEL: ${VERIFICATION_MODEL:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for model in "$$EMBEDDING_MODEL" "$$LLM_MODEL" "$$VERIFICATION_MODEL"; do
+          [ -z "$$model" ] && continue
+          echo "Downloading $$model (first run can take several minutes)..."
+          n=0
+          until ollama pull "$$model"; do
+            n=$$((n + 1))
+            if [ "$$n" -ge 5 ]; then
+              echo "ERROR: could not download $$model after 5 attempts. Check the server's internet connection, then run 'docker compose up -d' again."
+              exit 1
+            fi
+            echo "Download of $$model failed (attempt $$n/5) — retrying in 15s..."
+            sleep 15
+          done
+        done
+        echo "All AI models are ready."
+    restart: "no"
+    networks:
+      - college_rag_net
+    logging: *default-logging
+
+  backend:
+    build:
+      context: ./backend
+      # Overridden to "production" by docker-compose.prod.yml. Named explicitly
+      # in both files so neither depends on Dockerfile stage ordering.
+      target: development
+    restart: always
+    env_file:
+      # OPTIONAL, deliberately. Development always has a .env and relies on it
+      # (docker-compose.override.yml still requires one). PRODUCTION does not:
+      # it is configured entirely from .env.production, passed both as an
+      # env_file below and via --env-file for ${VAR} interpolation.
+      #
+      # This was `- .env`, which the Compose spec treats as REQUIRED. On a fresh
+      # server following DEPLOYMENT.md — which only ever creates
+      # .env.production — every single compose command failed outright with
+      # "env file .env not found". Making it optional means production needs no
+      # file full of example secrets sitting next to the real ones.
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_HOST: postgres
+      QDRANT_URL: http://qdrant:6333
+      OLLAMA_BASE_URL: http://ollama:11434
+      SERVER_HOST: ${SERVER_HOST:-localhost}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+    ports:
+      # 127.0.0.1 only: reachable from the server itself for diagnostics, never
+      # from the network. Deliberately kept in production too — it is not a
+      # network exposure, and it makes on-server troubleshooting possible.
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      # Liveness only (backend process is serving). Uses /api/health/live/ so a
+      # downstream outage (e.g. Ollama) never marks the backend itself
+      # unhealthy — the aggregate /api/health/ is for monitoring, not liveness.
+      #
+      # X-Forwarded-Proto MATTERS AND IS NOT OPTIONAL. In production
+      # SECURE_SSL_REDIRECT is on, so a plain-HTTP probe is answered with a 301
+      # to https://localhost:8000 — which is not a TLS port, so urlopen hangs
+      # until the 5s timeout and the probe fails FOREVER. The backend then never
+      # reports healthy, and because caddy waits on `service_healthy`, Caddy
+      # never starts and the whole deployment is dead. This header makes the
+      # probe present itself the way Caddy does. Harmless in development, where
+      # there is no redirect to trip over.
+      #
+      # The explicit timeout keeps a hung probe inside the 5s healthcheck window
+      # instead of relying on urlopen's default (no timeout at all).
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen(u.Request('http://localhost:8000/api/health/live/', headers={'X-Forwarded-Proto': 'https'}), timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    networks:
+      - college_rag_net
+    logging: *default-logging
+
+  sync_worker:
+    build:
+      context: ./sync_worker
+      target: development
+    restart: always
+    healthcheck:
+      # The sync worker has no port to probe, so liveness is inferred from its
+      # WORK: it rewrites state.json at the end of every poll cycle.
+      #
+      # This matters because the failure mode is silent. A worker that is
+      # running but no longer syncing looks identical to a healthy one from
+      # `docker compose ps` — the container is up, nothing has crashed, and the
+      # search index simply stops reflecting the database. Without this, the
+      # only symptom is stale answers, noticed days later.
+      #
+      # The threshold is generous (3x the 30s poll interval) so a slow cycle
+      # under load is not mistaken for a dead one.
+      test: ["CMD-SHELL", "test -f data/state.json && test $(( $(date +%s) - $(stat -c %Y data/state.json) )) -lt 120"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    env_file:
+      # OPTIONAL, deliberately. Development always has a .env and relies on it
+      # (docker-compose.override.yml still requires one). PRODUCTION does not:
+      # it is configured entirely from .env.production, passed both as an
+      # env_file below and via --env-file for ${VAR} interpolation.
+      #
+      # This was `- .env`, which the Compose spec treats as REQUIRED. On a fresh
+      # server following DEPLOYMENT.md — which only ever creates
+      # .env.production — every single compose command failed outright with
+      # "env file .env not found". Making it optional means production needs no
+      # file full of example secrets sitting next to the real ones.
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_HOST: postgres
+      QDRANT_URL: http://qdrant:6333
+      OLLAMA_BASE_URL: http://ollama:11434
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      # Wait for the backend so migrations + the rag_agent_ro role exist before
+      # the worker tries to read as that role.
+      backend:
+        condition: service_healthy
+    networks:
+      - college_rag_net
+    logging: *default-logging
+
+networks:
+  college_rag_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  ollama_data:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,48 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+
+# Postgres with TLS enabled.
+#
+# WHY ENCRYPT ON AN INTERNAL NETWORK
+# The backend and the database sit on a private docker bridge, so the traffic
+# never crosses the LAN. That is an argument for lower risk, not for none:
+#
+#   * every query and every result — including student records — crosses that
+#     link in cleartext, and anything able to observe the docker bridge (a
+#     compromised sibling container, a host-level capture, a misconfigured
+#     network mode) reads them without needing any credential;
+#   * the rag_agent_ro and app-owner passwords cross it on each new connection;
+#   * "internal" stops being true the moment someone moves the database to its
+#     own host, which is exactly the two-laptop split already planned.
+#
+# WHY THE CERTIFICATE IS GENERATED IN THE IMAGE
+# Postgres refuses to start if the private key is group- or world-readable, and
+# demands it be owned by the running user. A key bind-mounted from a Windows
+# host arrives as 0777 root-owned and Postgres exits. Generating it during the
+# build sidesteps the host filesystem entirely.
+#
+# WHAT THIS DOES AND DOES NOT GIVE YOU
+# The certificate is SELF-SIGNED, and clients connect with sslmode=require,
+# which encrypts but does NOT verify the server's identity. So:
+#     protects against  passive observation of the link
+#     does NOT protect  against an active attacker who can already redirect
+#                       traffic between the two containers
+# Closing that second gap needs sslmode=verify-full plus a CA the client
+# trusts. That is the right next step if the database ever moves to its own
+# host; on a single-host bridge the redirect it defends against implies the
+# host is already compromised.
+
+FROM postgres:16-alpine
+
+# openssl is not in the base image.
+RUN apk add --no-cache openssl
+
+# Generated at build time, then locked down. CN is the service name the backend
+# connects to, so it is already correct should verify-full be adopted later.
+RUN mkdir -p /var/lib/postgresql/tls \
+    && openssl req -new -x509 -days 3650 -nodes \
+        -out /var/lib/postgresql/tls/server.crt \
+        -keyout /var/lib/postgresql/tls/server.key \
+        -subj "/CN=postgres" \
+    && chown -R postgres:postgres /var/lib/postgresql/tls \
+    && chmod 600 /var/lib/postgresql/tls/server.key \
+    && chmod 644 /var/lib/postgresql/tls/server.crt

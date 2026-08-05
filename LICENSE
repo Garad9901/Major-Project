@@ -1,0 +1,125 @@
+PROPRIETARY SOFTWARE LICENSE
+All Rights Reserved
+
+College Assistant — A Multi-Agent Retrieval-Augmented Question Answering System
+Copyright (c) 2026 Yash Garad. All rights reserved.
+
+------------------------------------------------------------------------------
+1. OWNERSHIP
+------------------------------------------------------------------------------
+
+This software, including all source code, object code, configuration files,
+database schemas, prompt designs, documentation, and any accompanying materials
+(collectively, the "Software"), is the exclusive property of Yash Garad (the
+"Owner") and is protected by the Copyright Act, 1957 (India), as amended, and
+by applicable international copyright treaties and conventions.
+
+The Software is licensed, not sold. No transfer of ownership, title, or
+intellectual property rights of any kind is made or implied by the possession,
+receipt, or use of a copy of the Software.
+
+------------------------------------------------------------------------------
+2. NO LICENSE GRANTED
+------------------------------------------------------------------------------
+
+No rights or licenses are granted under this document, whether by implication,
+estoppel, or otherwise, except as expressly stated in a separate written
+agreement signed by the Owner.
+
+Without the prior express written permission of the Owner, no person or entity
+may:
+
+  (a) copy, reproduce, or duplicate the Software, in whole or in part;
+  (b) modify, adapt, translate, or create derivative works from the Software;
+  (c) distribute, publish, sublicense, sell, rent, lease, lend, or otherwise
+      transfer the Software or any copy thereof to any third party;
+  (d) host, deploy, or make the Software available as a service to any third
+      party, whether or not for a fee;
+  (e) reverse engineer, decompile, or disassemble the Software, except to the
+      limited extent such restriction is expressly prohibited by applicable law;
+  (f) remove, obscure, or alter any copyright notice, proprietary legend, or
+      attribution contained in or on the Software; or
+  (g) use the Software for any commercial purpose.
+
+------------------------------------------------------------------------------
+3. AUTHORIZED USE
+------------------------------------------------------------------------------
+
+Any permitted use of the Software is governed solely by the terms of a separate
+written licence agreement executed by the Owner. In the absence of such an
+agreement, no use is authorized.
+
+------------------------------------------------------------------------------
+4. THIRD-PARTY COMPONENTS
+------------------------------------------------------------------------------
+
+The Software is designed to operate together with third-party software
+components that are NOT owned by the Owner and are NOT covered by this licence.
+Each such component remains subject to its own licence terms, and nothing in
+this document modifies, supersedes, or restricts those terms.
+
+These components are obtained at build time via the declared dependency
+manifests and are not distributed as part of the Software. They include,
+without limitation:
+
+  Backend (see backend/requirements.txt)
+    Django, Django REST Framework, django-cors-headers, psycopg2-binary,
+    python-dotenv, gunicorn, sqlglot, qdrant-client, requests
+
+  Frontend (see frontend/package.json)
+    React, React DOM, Vite, @vitejs/plugin-react, Tailwind CSS, PostCSS,
+    Autoprefixer
+
+  Container images (see docker-compose.yml)
+    PostgreSQL, Qdrant, Ollama, Caddy, and the language models served by
+    Ollama
+
+The Owner's claim of copyright extends only to the original work of authorship
+in the Software — the application source code, architecture, agent designs,
+prompt engineering, security controls, and documentation authored by the Owner —
+and does not extend to any third-party component listed above.
+
+------------------------------------------------------------------------------
+5. DISCLAIMER OF WARRANTY
+------------------------------------------------------------------------------
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, ACCURACY, AND NON-INFRINGEMENT.
+
+The Software incorporates automated language-model-generated output. Such output
+may be incomplete, inaccurate, or otherwise unsuitable for any particular
+purpose, and must not be relied upon as authoritative without independent
+verification.
+
+------------------------------------------------------------------------------
+6. LIMITATION OF LIABILITY
+------------------------------------------------------------------------------
+
+IN NO EVENT SHALL THE OWNER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM,
+OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------------
+7. GOVERNING LAW
+------------------------------------------------------------------------------
+
+This licence shall be governed by and construed in accordance with the laws of
+India, without regard to its conflict-of-law provisions. The courts of India
+shall have exclusive jurisdiction over any dispute arising out of or in
+connection with this licence.
+
+------------------------------------------------------------------------------
+8. CONTACT
+------------------------------------------------------------------------------
+
+For licensing enquiries, permissions, or any other matter relating to this
+Software, contact the Owner:
+
+    Yash Garad
+    agamemnon1527@gmail.com
+
+------------------------------------------------------------------------------
+
+END OF TERMS

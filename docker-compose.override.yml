@@ -1,0 +1,83 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+
+# DEVELOPMENT overlay. Compose loads this file AUTOMATICALLY whenever you run
+# `docker compose ...` without -f flags, so the local workflow is unchanged:
+#
+#     docker compose up -d
+#
+# Production never loads it, because production names its files explicitly:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Everything development-only lives here:
+#   - bind mounts that overlay the image with live host source (autoreload)
+#   - the Vite dev server, which does not exist in production
+#   - the development Caddy config, which proxies to Vite instead of serving
+#     a compiled bundle
+#
+# These are here rather than in the base file because Compose merges list-valued
+# keys instead of replacing them, so a production override cannot remove them.
+
+# Restated rather than referenced: YAML anchors do not cross file boundaries, so
+# &default-logging in docker-compose.yml is not visible here.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  backend:
+    volumes:
+      # Live source overlay: edits on the host take effect without a rebuild.
+      - ./backend:/app
+
+  sync_worker:
+    volumes:
+      - ./sync_worker:/app
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: always
+    env_file:
+      - .env
+    environment:
+      VITE_API_PROXY_TARGET: http://backend:8000
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./frontend:/app
+      # Anonymous volume keeps the image's node_modules from being shadowed by
+      # the host bind mount above.
+      - /app/node_modules
+    networks:
+      - college_rag_net
+    logging: *default-logging
+
+  # The ONLY service exposed on the network. Terminates HTTPS (self-signed via
+  # `tls internal`) and reverse-proxies to the backend/frontend. Everything
+  # else is bound to 127.0.0.1, so the LAN can only reach the app over TLS.
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    environment:
+      SERVER_HOST: ${SERVER_HOST:-localhost}
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - college_rag_net
+    logging: *default-logging

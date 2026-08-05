@@ -1,0 +1,158 @@
+College Assistant - A Multi-Agent Retrieval-Augmented Question Answering System
+SOURCE CODE SUBMISSION MANIFEST
+
+Copyright (c) 2026 Yash Garad. All rights reserved.
+
+Author / Copyright Owner : Yash Garad
+Year                     : 2026
+Generated                : 26 July 2026
+Total files              : 133
+Total lines              : 6,439
+
+EXCLUSIONS
+  .env                  live credentials - deliberately withheld
+  node_modules/         third-party dependencies, not part of the work
+  __pycache__/          compiled bytecode artefacts
+  experiment_results/   generated evaluation output
+  sync_worker/data/     runtime state and change log
+
+====================================================================================================
+
+     SIZE   LINES  SHA-256                                                           FILE
+----------------------------------------------------------------------------------------------------
+     2021      62  2eee174f31550bffc034ea43a406fd90f6d54625969c03c193e39ebc95a5c2b8  .env.example
+      418      29  cfafd801c1c51c2f9f04308fe326c7f360ae03d61b39ced66e28fff3d34355d0  .gitignore
+    13046     235  73f89ee00998b35c5ba2409a16a1f19e5424d809542b812baa43c692c213859a  CHANGELOG.md
+      921      28  832cc646fef2a796b479e9021e6a0a20efc547152d7a33f134553c081f8208e2  Caddyfile
+     5795     125  0a2686857fcc35ed743382d5dcd9e527303ce33dee13a186bc6362c480a6cfc5  LICENSE
+     9046     248  31e617c8a9306de4f28b6929fd95c83c3b26b5259baa53ac0997edff7d290e8f  README.md
+     5697     147  1ffae5ef72d6293a89f90c1935b00b6a7c88ea7ff158c054abd3138aa7ec127e  RUNBOOK.md
+     5963     202  42f431129edf7ef377d334e26e022f6d539c3d91ca20183d68a6a1be3ecd124c  docker-compose.yml
+      607      24  7abd8000f659696f2f09c2fa369e6a76f8384851e903b2b95e32460dd104be82  backend/Dockerfile
+      780      22  23fe92f8408fe450d1b973cd0b7f8360bbdda522957b90a5b5b9be515ecee528  backend/entrypoint.sh
+      618      21  77478204de85b0701b171d156d57a81896b557bdad02c97a05cc631b190120a6  backend/manage.py
+      226      11  dbca0bdb5729e500645933d7acc13a6d698930841e39d1319df1641cb8e762a7  backend/requirements.txt
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/academics/__init__.py
+      205       8  12b7bc32fadda4d2b04a4a2de10ba8e963fb55c76d9d0e51ac185a4ff5123961  backend/academics/apps.py
+     9020     247  01e63507edc463857be87911b1885945a2816ef8060b1777146ad3cfdfb164ce  backend/academics/models.py
+    12609     260  3bdee4adac8f5274ef18b07215d6ac151ef291bb2214bcbe6ef4178ddf8a1ca7  backend/academics/management/commands/seed_demo_data.py
+     2722      70  e752bc20976b8e6ebcf8a74e29437bb5b1032e9d7c0f83410f33a94e204451b9  backend/academics/management/commands/setup_readonly_role.py
+    12882     245  5dbec4ae10da7af4e6430fb35d8e16dfc255e0b96d3eb1a6d35902366d8c82e8  backend/academics/migrations/0001_initial.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/academics/migrations/__init__.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/accounts/__init__.py
+      203       8  6dedb700c3783f90354e2c8c9b4f774a3961711c8c4250842b8ad4636aa0221a  backend/accounts/apps.py
+      511      14  62c43e8688ecf57053c708985a93447a529314789104623516a65540f768d0b8  backend/accounts/permissions.py
+      751      19  845373127428fe91b3fe393c8b71e204dd3ce2372d6553c79a5740a9f23a28c8  backend/accounts/throttling.py
+      302      12  80165a173940208437693625d339b614eeed5fc4fa83be045abd3e72d1c18f2a  backend/accounts/urls.py
+     1958      52  67e6ec65b75bdbb0fca9328f9767b88dc3072e4824baf31009a3c465688b79d0  backend/accounts/views.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/accounts/management/__init__.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/accounts/management/commands/__init__.py
+      896      26  e5c176e8c5b0873dc21099f1e545c811fccc1265e022bfbe04eba0235039d929  backend/accounts/management/commands/create_staff_user.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/audit/__init__.py
+      197       8  ad7f21f0fe34833c776adfd6bd4d2b84a15e6d28baecef474e934c776e3c8156  backend/audit/apps.py
+     1288      30  beb0c2c769918e0560046b0829c123c652fd8d45795d5f1e62288c6e38cf11a6  backend/audit/models.py
+     1342      36  f01197378d6c5e643d3ec9430f371cf7715af02b0fdc87a0fa8a6ef5424f78c6  backend/audit/migrations/0001_initial.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/audit/migrations/__init__.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/common/__init__.py
+     1208      35  842585bbc8187e08557da3e7c015a6a132f2ca5ce64a7085e5c0d90163b14a3f  backend/common/exceptions.py
+     3052      78  2b7cf0f26aa535992e1d16b5c05abbb34c1d12b8fa53c7dc6b591fbbd7ba2c47  backend/common/ollama.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/config/__init__.py
+      222       9  4691452bb5899838b07467ae9477fa70e4d8e9634713c45cb09f17b7de0af3de  backend/config/asgi.py
+     5643     182  40ba270793a64c28c42597f9a59edca4748b295fc1a67234accbeb94428c9cd7  backend/config/settings.py
+      262       9  3c1a72689e1be16eef9f9c831e6f96eefe0e991bc7e97f7d3e1f015e4273e153  backend/config/urls.py
+      222       9  a4e0a9e5a709881fa186c673a024f12aba4b7a8118a2ec63bdafcd8a1c8c3350  backend/config/wsgi.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/experiments/__init__.py
+      209       8  48619b3fc7254b10d564667293e56c7436e133cbfdbdad64613419253f5eeeb5  backend/experiments/apps.py
+     7600     205  1f01ffed3649d82dd605b9fc9ec886aecd7c033ac94cfd24b61f77fe886cb73b  backend/experiments/runner.py
+     1986      61  b4d16587da233bdc822c473d9fbf29198a47099601c534805e151e21ccf909c4  backend/experiments/similarity.py
+      755      22  8812c73093468128e1c71e1558a21ff4d396272a42f6e3f0f81badf6c8bb27fa  backend/experiments/warmup.py
+     1908      42  a1ef9c6fefc2330db90a0892bb77e7ab982ea135cabc5404977a52e9976d7b27  backend/experiments/fixtures/sample_qa.json
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/experiments/management/__init__.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/experiments/management/commands/__init__.py
+     7952     176  d26b9dca68091d9fca77314a1c18b7e1ed29d9b01266e869a5f75cb7a2df1745  backend/experiments/management/commands/load_test.py
+     6768     160  0a82bb47bca2ab12d80453773a0d2eb8ae6d2130a4f6812c34937e40e7f99053  backend/experiments/management/commands/run_experiment.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/health/__init__.py
+      199       8  acc1e9a42c926e4bd1d514b63ba81542044195c4475683a51e4a23f5539dd93d  backend/health/apps.py
+      244      10  dd0515507959fd6d03746a4197035a6485994a695a6bd3da4dc4799c0dce3596  backend/health/urls.py
+     1879      62  be85394b05f859eba49bc87efba81840a486357f37f06bf0701b0251e511cac9  backend/health/views.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/health/management/__init__.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/health/management/commands/__init__.py
+     5337     121  c08e669f985ea37e904dc9b4b327fec5f60e02d990ee02e2dc7e50711afb1ce5  backend/health/management/commands/check_rag_agent_ro.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/orchestrator/__init__.py
+      211       8  8f2cefad405ccc3d370c151d655d1bfbe135513b5fd93285508eb5b3cfc4df55  backend/orchestrator/apps.py
+     2381      58  842fb59decb5bd561a0e1d42801dfa72bc7d9827c2d673198a31d5050c84df9a  backend/orchestrator/sanitize.py
+     7058     191  af8c59cbb169b9993bd6570922f2549175fc21eefe46fc61649f32867fc8ddb7  backend/orchestrator/service.py
+      158       9  96f2c9f694fef2b8de4d91522bf9467e2a33d28d6716c785ab9c60f753041266  backend/orchestrator/urls.py
+     5302     142  e34029df6d03ea7c5252f90de1e528ab9bf782c55919d11470ae7067b33e9c2f  backend/orchestrator/views.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/rag_agent/__init__.py
+      204       8  f4861547888580bc135473057e52ca0ec63707fc694e08148200f0a2d7de48cc  backend/rag_agent/apps.py
+      749      21  81cf388c6870f1bb03c29e8ba6a1cb64103b281a2c7384c9fa133d44afcdff80  backend/rag_agent/embedder.py
+     1214      47  f61e569f9e8538195513a45e453edf48a7f116afdf31429df764a8276a6b1874  backend/rag_agent/service.py
+     1801      52  0c0baaa99712a12aae390443a8743656e94f7ca55187d34c0509a6dbd1d86d8c  backend/rag_agent/vector_store.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/rag_agent/management/__init__.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/rag_agent/management/commands/__init__.py
+     1536      41  c9ba70d1b593a5ca28ba5c6ee28ce8e48a9829c9548385105237506fac360f5c  backend/rag_agent/management/commands/demo_rag_agent.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/router_agent/__init__.py
+      210       8  8ad653044b0de84a73bfd13e493759b32331f15ad62dc82418f46a35e717c9b3  backend/router_agent/apps.py
+     1826      49  fc492b2e2036848d12388176950536d095b138dd9ce55645b66448f148ce3440  backend/router_agent/classifier.py
+     2605      56  2944580d3f0b3418360a12ff89c69f955815a4cd76b6519e88b6684ddc15d75d  backend/router_agent/llm_client.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/router_agent/management/__init__.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/router_agent/management/commands/__init__.py
+     2285      53  0891803a8944e523adcfac0eb85fdc7122fc9bffbbc52a19b752bdf9c151ba81  backend/router_agent/management/commands/demo_router_agent.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/sql_agent/__init__.py
+      204       8  ff3bb26e4609deeac7b3f3ae26165620c488edca69270224e93f04c340542404  backend/sql_agent/apps.py
+      756      15  07467fa67de0d0710e69c729ab3a07e0ea2232ebaa35a1ec6992b1e418f85be6  backend/sql_agent/db.py
+     1852      49  86ec2c6fc31d1cd7357527d4d0bf67b82de18ac98c2c0073d43c6253980e2570  backend/sql_agent/executor.py
+     3379      91  d00c5a7894af698475fef3d6602869a89c84f957e9e85100f14280db36297f99  backend/sql_agent/guard.py
+     1555      36  9dc00ed08e9a0f50e01b56c906a98bcd0b89911ae7870836066568d20e017ae8  backend/sql_agent/llm_client.py
+     2629      70  6f87d2ff890e0af304c311d0d641e31925b0bae031127fcd93bc403c2b926a0b  backend/sql_agent/schema.py
+     3039      80  b9ff40ceec7fae36020a2bd1c9d9f868e7265a4173e15abe0befcfb08b126fff  backend/sql_agent/service.py
+     3091      73  a530c70d06e5052ceec8f83ed0577ad94d581b4148d9dd160b207e2157d68a7c  backend/sql_agent/tests.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/sql_agent/management/__init__.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/sql_agent/management/commands/__init__.py
+     2323      57  ddedc1cfc24fd0308a799e1f66937dd2bffb3fce1894eedd4c038bf3f946ee72  backend/sql_agent/management/commands/demo_sql_agent.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/synthesis_agent/__init__.py
+      216       8  047869dd26811abcfbd5deb13db06bc08806b54ae940281db45f61a71ad946f0  backend/synthesis_agent/apps.py
+     2914      63  cad871b825f8bb43a4a035b1e9fc53463290becc08adc235055e2c4dab6fdacd  backend/synthesis_agent/llm_client.py
+     2340      65  12c3e16832b57a2463805ec241bbfd79aece65a5d4e2d595d882039f4f4aea02  backend/synthesis_agent/service.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/synthesis_agent/management/__init__.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/synthesis_agent/management/commands/__init__.py
+     2770      60  46416c1457aceec708ae5305b0839db6999bc086e15d42f144a6e1766ed1ae8c  backend/synthesis_agent/management/commands/demo_synthesis_agent.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/verification_agent/__init__.py
+      222       8  1d034dd6869117a3f81f8729e972ca568a1d31dc7e8535bcaab1c63dc6b6b4d4  backend/verification_agent/apps.py
+     4589      99  c93b0e10988cf7eebd54a67ed21f604228d2be85f8633faf08b508eb4f2cae9e  backend/verification_agent/llm_client.py
+     1400      43  dc6dfd294b7fc723cf368a54bce498c2eff9cfca5c58dec6493d62a9db9b495d  backend/verification_agent/models.py
+     4522     133  bde78057d75ddb808e427a6b6f65cee37b1823dc5d250f45738bb8275b7eb124  backend/verification_agent/service.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/verification_agent/management/__init__.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/verification_agent/management/commands/__init__.py
+     5041      98  6463b35f26644fa3c52a29cac15be97594bf94d8a1157ba74aec9b37ffd1dd98  backend/verification_agent/management/commands/demo_verification_agent.py
+     1400      37  a2032c3ecc15620a09cb5c8fde3db9c55179dfcb1eab7dd2bcb76deac4f1c054  backend/verification_agent/migrations/0001_initial.py
+       54       1  e51fc9d2ddfc68794f733f430de43ca79d397156e428243d7646da6cd5d765d6  backend/verification_agent/migrations/__init__.py
+     4636     106  5e6c78ef59ef2cc390a596cb68fc685108861887d3e15a3a92a547589f837864  db/sql/create_rag_agent_ro.sql
+      177      14  a481f7d34fc61049a529950cb97aa84ca0a1d5ceb61fe93e61d1c8d6d05eff3b  frontend/Dockerfile
+      359      13  03c52ff6e86b81b6946a7bd8a03ae96461b3016ed0d9696ef33800c801d33238  frontend/index.html
+      609      25  ba119710ced691ed1143876e3ac616d1ae09c4952a89764065fe09682e58012f  frontend/package.json
+      137       8  74aa252c7103c41ba574237ffed06c1186a7ad485e072140984d8e1dbe145669  frontend/postcss.config.js
+      219      10  a1d4fb9e954fa8915cc2bc54ce78494da5181de0e4a3f28b6fae7e159198e26d  frontend/tailwind.config.js
+      574      21  12ef926c16556430aa7d3374458bc11fd437fdfb34cb37bc482b3bea1eaf9ef9  frontend/vite.config.js
+     1277      51  9d299efdd7be62721ee9bda3f8e33e8c12a7ce7d5ee9ddf8401eac9668ddde16  frontend/src/App.jsx
+     3865     120  6cc468c56933a35a957b9e415bb7503dbbf8733279edf37a71b340062662f2d4  frontend/src/api.js
+      118       5  6335e19177feaadc98f2ffd852c250e310a02be76b47ae710a36422714675f8f  frontend/src/index.css
+      296      13  dfa0d5e69528b27df1d3d1d80e0252ba318d2f085a06244683fbe407dc2c7391  frontend/src/main.jsx
+     5095     138  d88c6363400556fc4df308ba451fdf66788dba0684bfb88f2415787d02382e27  frontend/src/components/Chat.jsx
+     2295      69  5646c6415f1efece9d09043c9f7637290ff9ac2f02cb388b731a9f4840a00c38  frontend/src/components/Login.jsx
+      383      19  8ea2e0e424d647cdddc1ed3970e80afa9888e218d96cec0c915b18d9e05660a1  sync_worker/Dockerfile
+     1728      52  20723887da5b39ab8f8850251f5d3dac521accb84829f0b0c76b5bbd7ef70116  sync_worker/chunker.py
+     1953      51  21ab94ec9724078868fd2fa1c20d3822737230a7f7d60c7059fe51ea3eba464f  sync_worker/config.py
+      608      21  2781d518531659f584bce5db48f89c9ace4257a57ab006953817f28eabccaf1d  sync_worker/embedder.py
+      382       8  41319a0f8d0211ddbecd54bf1221ee370ec3bcba97c7af7caaf16130aa1d6e7a  sync_worker/lookups.py
+     3543     105  0bd4f47d30ddec560ef758654daad0220af1ebd48472f4ed1fb64979a7ed824d  sync_worker/main.py
+     2082      63  c578e5deb0aac0e3ec42bf500c17dcbe4c3406620593e09ab09069c7f235d6f1  sync_worker/poller.py
+      311      13  af8b838a3799bec0209106ece0511a1fc5875bc8f2264263086aa28226cf95a5  sync_worker/queue_writer.py
+      129       6  afbf307f5db42f75b924def6b8cef2984ec8f788e5db216465e429b708f25ca7  sync_worker/requirements.txt
+      767      26  63815cb131acfbb74814cbd3a0862001926a981b83d978b11c63f61d9b19d654  sync_worker/state.py
+     5709     161  2318387ca37a3bd8b65caf05147159258688dfeaef773bbd97f7e05bdacb2ac1  sync_worker/test_embedding_pipeline.py
+     1944      67  4b555c99d25b3750d9ecc6f28cd68b01454b70c1cccdbafa32f0a3bc29d6b53e  sync_worker/vector_store.py
+----------------------------------------------------------------------------------------------------
+
+END OF MANIFEST

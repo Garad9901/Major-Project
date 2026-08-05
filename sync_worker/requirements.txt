@@ -1,0 +1,6 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+
+python-dotenv>=1.0
+psycopg2-binary>=2.9
+qdrant-client>=1.9
+requests>=2.32

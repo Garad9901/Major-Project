@@ -1,0 +1,35 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+# Keeps secrets, history, tests and runtime state out of the sync_worker image.
+
+# --- secrets: must never enter an image layer --------------------------------
+.env
+.env.*
+
+# --- version control / editor -------------------------------------------------
+.git
+.gitignore
+.vscode
+.idea
+
+# --- python artefacts ---------------------------------------------------------
+**/__pycache__
+**/*.py[cod]
+.venv
+venv
+
+# --- tests --------------------------------------------------------------------
+# test_embedding_pipeline.py is excluded for a security reason, not just size:
+# it connects as the Postgres OWNER (POSTGRES_USER) and performs INSERTs, which
+# is precisely the capability the production sync_worker is designed never to
+# have. Shipping it would place owner-credentialed write code inside a container
+# whose whole purpose is read-only access.
+test_embedding_pipeline.py
+**/test_*.py
+**/*_test.py
+.pytest_cache
+
+# --- runtime state (recreated on start; never baked into an image) ------------
+data/
+
+# --- documentation ------------------------------------------------------------
+*.md

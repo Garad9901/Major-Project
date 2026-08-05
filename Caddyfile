@@ -1,0 +1,48 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+
+# HTTPS reverse proxy for the College Assistant.
+#
+# The site is named (localhost + whatever SERVER_HOST is set to) so Caddy's
+# `tls internal` issuer can mint a certificate for those names from a locally-
+# trusted CA — no public domain or internet needed, suited to an internal LAN.
+# The browser talks only to Caddy (443); Caddy forwards /api/* to the Django
+# backend and everything else to the frontend, so the SPA and API share one
+# HTTPS origin (no CORS, and session cookies get the Secure flag). Caddy also
+# auto-redirects plain HTTP (80) to HTTPS.
+
+localhost, {$SERVER_HOST:localhost} {
+	tls internal
+	encode gzip
+
+	# --- security headers (DEVELOPMENT policy) ------------------------------
+	# Deliberately WEAKER than Caddyfile.prod, and only here.
+	#
+	# The Vite dev server injects an inline bootstrap script and opens a
+	# websocket for hot reload, so a dev CSP must allow 'unsafe-inline' for
+	# scripts and ws: for connections. Production allows NEITHER — it serves a
+	# compiled bundle that needs no such thing.
+	#
+	# Keeping a relaxed policy here rather than none at all means the header is
+	# exercised in development, so a mistake in its syntax surfaces before
+	# deployment instead of breaking the production site. Do not copy this
+	# policy into Caddyfile.prod.
+	header {
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+
+	# API -> Django. SSE streaming is passed through unbuffered.
+	handle /api/* {
+		reverse_proxy backend:8000 {
+			flush_interval -1
+		}
+	}
+
+	# Everything else -> the frontend (Vite) dev server.
+	handle {
+		reverse_proxy frontend:5173
+	}
+}

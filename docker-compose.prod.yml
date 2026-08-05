@@ -1,0 +1,250 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+
+# PRODUCTION overlay. Never loaded automatically — it must be named, AND it must
+# be given --env-file:
+#
+#     docker compose --env-file .env.production \
+#         -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# --env-file IS MANDATORY. WITHOUT IT PRODUCTION CANNOT START.
+#
+# Two different mechanisms are at work here and they do NOT read the same file:
+#
+#   env_file:            injects variables INTO a container. Only backend and
+#                        sync_worker are given .env.production this way.
+#   ${VAR} interpolation resolves while Compose parses THIS FILE, and reads the
+#                        host environment plus the project's .env — it has never
+#                        read .env.production and cannot be made to.
+#
+# The postgres service takes its password by interpolation:
+#     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+# so without --env-file the database initialises with whatever is in .env (the
+# example password on a fresh server) while the backend connects with the strong
+# one from .env.production. They disagree, and the backend dies at startup with
+# "password authentication failed for user postgres". This was observed, not
+# theorised. Passing --env-file makes interpolation read .env.production too, so
+# both sides agree.
+#
+# Every variable interpolated by these two compose files is present in the
+# .env.production that scripts/generate_secrets.sh writes, so redirecting the
+# interpolation source loses nothing.
+#
+# Because docker-compose.override.yml is NOT loaded by that command, the
+# development bind mounts and the Vite dev server simply do not exist here.
+# Production containers therefore run the code baked into their images and
+# nothing else.
+#
+# Contains: production build targets, strict Django settings selection (Phase 2),
+# secret loading (Phase 3), resource limits, log rotation and healthchecks
+# (Phase 5).
+
+# Restated rather than referenced: YAML anchors do not cross file boundaries.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# ==============================================================================
+# RESOURCE LIMITS — sized against a 16 GB / 4-core baseline
+# ==============================================================================
+# The target server was not decided when these were written, so every value is
+# an env var you can raise without editing this file. The MEMORY limits are the
+# ones that matter; the CPU limits mostly exist to stop a runaway small service
+# from starving Ollama.
+#
+# A CPU limit HIGHER than the machine's core count is harmless (never reached),
+# so the defaults lean generous. A MEMORY limit that is too low is not harmless:
+# the kernel OOM-kills the container.
+#
+#   ollama       8 GB   qwen2.5:7b is ~4.7 GB resident plus ~275 MB for the
+#                       embedding model, plus per-request KV cache. THIS IS THE
+#                       CEILING THAT MATTERS. Below ~7 GB the model will not
+#                       load and every answer fails. With a smaller model
+#                       (qwen2.5:3b) this can drop to 4 GB.
+#   postgres     2 GB   shared_buffers plus connections; generous for this size
+#                       of dataset but cheap insurance during a restore.
+#   qdrant       1 GB   the vector index for institutional text is small.
+#   backend      1 GB   ONE gunicorn worker at ~250 MB plus headroom.
+#   sync_worker  512 MB polls and embeds a few rows at a time.
+#   caddy        256 MB static files and TLS termination only.
+#   ollama-pull  1 GB   transient; only runs on first start.
+#
+# TOTALS (measured from the merged config, not estimated):
+#
+#   all seven services      13.75 GB   <- worst case, during first start
+#   steady state            12.75 GB   <- ollama-pull has exited by then
+#
+# Add ~2 GB for the host OS and Docker itself. So 16 GB is the practical FLOOR
+# and it is genuinely tight: at first start the ceiling is 13.75 + 2 = 15.75 GB
+# on a 16 GB machine, leaving ~250 MB of headroom. It works because ollama-pull
+# is only downloading, but nothing else may be running on that box.
+#
+# 24-32 GB is what I would actually recommend for institute-wide use.
+#
+# (An earlier version of this note said 12.75 GB was the total of the list
+# above. That was the steady-state figure with ollama-pull omitted, which
+# understated the first-start requirement by exactly its 1 GB limit.)
+# ==============================================================================
+
+services:
+  backend:
+    build:
+      context: ./backend
+      # Non-root image with source baked in. See backend/Dockerfile.
+      target: production
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: ${BACKEND_MEMORY_LIMIT:-1g}
+          cpus: "${BACKEND_CPU_LIMIT:-2.0}"
+    env_file:
+      # Loaded after the base .env, so production values win where both define
+      # a key. Optional so that `config` and image builds work before the file
+      # has been generated (scripts/generate_secrets.sh, Phase 3).
+      - path: .env.production
+        required: false
+    environment:
+      # Selects gunicorn in entrypoint.sh, and (from Phase 2) the production
+      # Django settings.
+      DJANGO_ENV: production
+      # Never load the demo dataset onto a server holding real records.
+      SEED_DEMO_DATA: "false"
+      # Gunicorn tuning — see backend/gunicorn.conf.py for the reasoning behind
+      # these defaults. Raise workers only if the server has RAM to spare AND
+      # Ollama is not already the bottleneck (it usually is).
+      # ONE worker, deliberately. The rate limiter and the LLM admission queue
+      # are both process-local (no Redis), so a second worker would silently
+      # double both limits. See backend/gunicorn.conf.py and
+      # orchestrator/concurrency.py.
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-1}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-4}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-300}
+      # LLM admission control. 1 = the honest default for CPU inference; raise
+      # only with a GPU, and measure. See orchestrator/concurrency.py.
+      LLM_MAX_CONCURRENCY: ${LLM_MAX_CONCURRENCY:-1}
+      LLM_QUEUE_TIMEOUT: ${LLM_QUEUE_TIMEOUT:-25}
+      # Inline answer verification. ON by default. MEASURED COST: roughly
+      # doubles response time (+98% warm), which also roughly halves throughput
+      # because inference serialises. See orchestrator/verification.py.
+      ENABLE_VERIFICATION: ${ENABLE_VERIFICATION:-true}
+
+  sync_worker:
+    build:
+      context: ./sync_worker
+      target: production
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: ${SYNC_WORKER_MEMORY_LIMIT:-512m}
+          cpus: "${SYNC_WORKER_CPU_LIMIT:-1.0}"
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      DJANGO_ENV: production
+
+  # Production web tier: Caddy with the COMPILED frontend baked in. There is no
+  # Node process at runtime and no Vite dev server.
+  #
+  # Build context is the repository root because the image needs both frontend/
+  # and Caddyfile.prod; see .dockerignore for what is excluded from it.
+  caddy:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.caddy
+    restart: always
+    environment:
+      SERVER_HOST: ${SERVER_HOST:-localhost}
+      # Empty (the default) = a real Let's Encrypt certificate, obtained and
+      # renewed automatically. Set to "tls internal" for a LAN-only deployment
+      # with a self-signed certificate. See the header of Caddyfile.prod.
+      CADDY_TLS: ${CADDY_TLS-}
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    # Runs as uid 1001 (set in the image). Binding :80/:443 as a non-root user
+    # requires exactly one capability; everything else stays dropped.
+    cap_add:
+      - NET_BIND_SERVICE
+    volumes:
+      # No Caddyfile bind mount — the production config is baked into the image
+      # so what is deployed cannot be edited in place on the server.
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      # The caddy image does ship wget. --no-check-certificate because the cert
+      # is self-signed by Caddy's internal CA; this probe only asks "is the
+      # proxy answering", not "is the certificate trusted".
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--no-check-certificate", "--spider", "https://127.0.0.1/api/health/live/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - college_rag_net
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: ${CADDY_MEMORY_LIMIT:-256m}
+          cpus: "${CADDY_CPU_LIMIT:-0.5}"
+
+  # --- infrastructure limits (production only; dev stays unconstrained) -------
+  postgres:
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: ${POSTGRES_MEMORY_LIMIT:-2g}
+          cpus: "${POSTGRES_CPU_LIMIT:-2.0}"
+
+  qdrant:
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: ${QDRANT_MEMORY_LIMIT:-1g}
+          cpus: "${QDRANT_CPU_LIMIT:-1.0}"
+
+  ollama:
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          # THE CEILING THAT MATTERS. Must exceed the RESIDENT size of every
+          # model kept in memory, or the container is OOM-killed and every
+          # answer fails.
+          #
+          # Raised from 8g to 12g because OLLAMA_KEEP_ALIVE=-1 now pins all
+          # three models simultaneously rather than letting them be evicted:
+          #
+          #     qwen2.5:7b          5.1 GB   answering
+          #     qwen2.5:3b          2.2 GB   verification
+          #     nomic-embed-text    0.4 GB   embedding
+          #     ------------------------------
+          #     resident            7.7 GB   + KV cache and runtime overhead
+          #
+          # At 8g that is ~96% full before a single token is generated. This is
+          # a deliberate RAM-for-latency trade: keeping them warm avoids a
+          # measured 250s reload penalty (see OLLAMA_KEEP_ALIVE in the base
+          # file). If the server cannot spare 12g, set OLLAMA_KEEP_ALIVE=5m and
+          # accept slow first questions, or drop VERIFICATION_MODEL so only two
+          # models stay resident.
+          memory: ${OLLAMA_MEMORY_LIMIT:-12g}
+          # Inference is the workload this server exists for, so Ollama is given
+          # the most CPU. Raise to match the core count on a larger machine.
+          cpus: "${OLLAMA_CPU_LIMIT:-4.0}"
+
+  ollama-pull:
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: ${OLLAMA_PULL_MEMORY_LIMIT:-1g}
+          cpus: "${OLLAMA_PULL_CPU_LIMIT:-2.0}"

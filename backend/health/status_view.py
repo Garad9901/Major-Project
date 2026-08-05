@@ -1,0 +1,173 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+
+"""A single status page an operator can open in a browser.
+
+WHY A PAGE AND NOT JUST JSON
+/api/health/ already returns JSON and is what the container healthcheck and any
+future monitoring uses. It is not what a person uses at 9am when someone says
+"the assistant isn't working". This renders the same information as a page that
+loads in one click, refreshes itself, and says in words which component is at
+fault and what to do about it.
+
+WHY IT IS PUBLIC (AND WHAT THAT COSTS)
+No login required. The reasoning: the people most likely to need it are locked
+out precisely when authentication is the thing that is broken, and a status page
+behind the auth system cannot tell you the auth system is down.
+
+The cost is that anyone who can reach the URL learns which components exist and
+whether they are healthy. That is accepted deliberately, and it is why this page
+exposes NO counts, NO data, NO versions and NO configuration — only up/down per
+component. An attacker learns that a college runs a database, which they could
+have guessed.
+
+If the institute would rather it were private, gate it behind IsAuthenticated —
+but then also keep an unauthenticated way to check, or the first outage that
+touches the database makes the status page useless too.
+"""
+
+import logging
+import time
+
+from django.db import connections
+from django.http import HttpResponse
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
+from rest_framework.permissions import AllowAny
+
+from common import ollama
+from rag_agent import vector_store
+
+logger = logging.getLogger("health")
+
+
+def _timed(fn):
+    """Run a check, returning (ok, milliseconds). Never raises."""
+    started = time.perf_counter()
+    try:
+        ok = bool(fn())
+    except Exception as exc:
+        logger.warning("status: check failed: %s", exc)
+        ok = False
+    return ok, round((time.perf_counter() - started) * 1000)
+
+
+def _database():
+    with connections["default"].cursor() as cur:
+        cur.execute("SELECT 1;")
+        return cur.fetchone() is not None
+
+
+def _readonly_role():
+    """The read-only path specifically, which the app-owner check does not cover.
+
+    Worth its own line: the assistant can look perfectly healthy while being
+    unable to answer a single question, because these are different credentials
+    against different grants.
+    """
+    from sql_agent import db
+    with db.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1;")
+            return cur.fetchone() is not None
+
+
+CHECKS = [
+    ("Database", _database, "Postgres — records, accounts and history"),
+    ("Read-only DB role", _readonly_role, "The restricted account the assistant queries with"),
+    ("Language model", ollama.ping, "Ollama — answers questions"),
+    ("Search index", vector_store.ping, "Qdrant — finds descriptive content"),
+]
+
+# What to do about each, shown only when that component is down. An operator
+# reading this page is often not the person who built it.
+REMEDY = {
+    "Database": "docker compose ... restart postgres — then check disk space on the server.",
+    "Read-only DB role": "Restart the backend; it recreates the role and its grants on startup.",
+    "Language model": "docker compose ... restart ollama. First start after a restart is slow while the model loads.",
+    "Search index": "docker compose ... restart qdrant. Descriptive answers degrade; database answers keep working.",
+}
+
+_PAGE = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="15">
+<title>{title}</title>
+<style>
+ :root{{color-scheme:light dark}}
+ body{{font:15px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;margin:0;padding:2rem 1rem;
+       background:#fff;color:#111}}
+ main{{max-width:46rem;margin:0 auto}}
+ h1{{font-size:1.35rem;margin:0 0 .25rem}}
+ .sub{{color:#666;font-size:.85rem;margin:0 0 1.5rem}}
+ .banner{{padding:.9rem 1.1rem;border-radius:.6rem;font-weight:600;margin-bottom:1.5rem}}
+ .ok{{background:#e7f6ec;color:#0b6b2f}}
+ .bad{{background:#fdecec;color:#a11}}
+ table{{width:100%;border-collapse:collapse}}
+ td,th{{text-align:left;padding:.6rem .5rem;border-bottom:1px solid #e5e5e5;vertical-align:top}}
+ th{{font-size:.75rem;text-transform:uppercase;letter-spacing:.04em;color:#666}}
+ .pill{{display:inline-block;padding:.15rem .55rem;border-radius:1rem;font-size:.78rem;font-weight:600}}
+ .pill.up{{background:#e7f6ec;color:#0b6b2f}} .pill.down{{background:#fdecec;color:#a11}}
+ .desc{{color:#666;font-size:.82rem}}
+ .fix{{color:#a11;font-size:.82rem;margin-top:.3rem}}
+ .ms{{color:#888;font-size:.8rem;font-variant-numeric:tabular-nums}}
+ footer{{margin-top:1.5rem;color:#888;font-size:.78rem}}
+ @media (prefers-color-scheme:dark){{
+   body{{background:#0f0f10;color:#eee}} td,th{{border-color:#2a2a2c}}
+   .ok{{background:#0e2f1c;color:#7fdba4}} .bad{{background:#3a1414;color:#ffa3a3}}
+   .pill.up{{background:#0e2f1c;color:#7fdba4}} .pill.down{{background:#3a1414;color:#ffa3a3}}
+   .desc,.sub,.ms,footer{{color:#999}}
+ }}
+</style></head><body><main>
+<h1>College Assistant — system status</h1>
+<p class="sub">{host} · checked {now} UTC · refreshes every 15s</p>
+<div class="banner {banner_class}">{banner}</div>
+<table>
+<tr><th>Component</th><th>Status</th><th>Response</th></tr>
+{rows}
+</table>
+<footer>Machine-readable version: <code>/api/health/</code> — returns HTTP 503 when anything is down.</footer>
+</main></body></html>
+"""
+
+_ROW = """<tr>
+ <td><strong>{name}</strong><div class="desc">{desc}</div>{fix}</td>
+ <td><span class="pill {cls}">{state}</span></td>
+ <td class="ms">{ms} ms</td>
+</tr>"""
+
+
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def status_page(request):
+    """Human-readable status dashboard at /api/health/status/."""
+    results = [(name, desc, *_timed(fn)) for name, fn, desc in CHECKS]
+    down = [name for name, _desc, ok, _ms in results if not ok]
+
+    rows = "".join(
+        _ROW.format(
+            name=name, desc=desc,
+            cls="up" if ok else "down",
+            state="Operational" if ok else "DOWN",
+            ms=ms,
+            fix="" if ok else f'<div class="fix">Try: {REMEDY.get(name, "check the container logs")}</div>',
+        )
+        for name, desc, ok, ms in results
+    )
+
+    if down:
+        banner = f"{len(down)} component{'s' if len(down) > 1 else ''} down: {', '.join(down)}"
+    else:
+        banner = "All systems operational"
+
+    html = _PAGE.format(
+        title="Status — All operational" if not down else f"Status — {len(down)} DOWN",
+        host=request.get_host(),
+        now=time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+        banner=banner,
+        banner_class="ok" if not down else "bad",
+        rows=rows,
+    )
+    # 503 when degraded so an uptime monitor pointed here reacts, not just a human.
+    return HttpResponse(html, content_type="text/html; charset=utf-8",
+                        status=200 if not down else 503)

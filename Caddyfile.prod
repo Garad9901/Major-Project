@@ -1,0 +1,130 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+
+# PRODUCTION reverse proxy and static file server.
+#
+# Differs from the development Caddyfile in one structural way: there is no Vite
+# dev server behind it. The frontend is a compiled bundle baked into this image
+# at /srv and served directly by Caddy.
+#
+# ==============================================================================
+# TLS — DRIVEN BY ONE ENVIRONMENT VARIABLE
+# ==============================================================================
+# This file is used for BOTH a public deployment with a real certificate and a
+# LAN deployment with a self-signed one. Which you get depends entirely on
+# CADDY_TLS in .env.production:
+#
+#   CADDY_TLS=""           <- INTERNET. Caddy obtains a real Let's Encrypt
+#   (empty, the default)      certificate automatically on first start and
+#                             renews it forever with no cron job, no certbot and
+#                             no reload hook. Requires only that SERVER_HOST is a
+#                             real DNS name pointing at this server and that
+#                             ports 80 and 443 are reachable from the internet
+#                             (port 80 is used for the ACME challenge — do not
+#                             firewall it off).
+#
+#   CADDY_TLS="tls internal"  <- LAN ONLY. Self-signed from Caddy's own local
+#                             authority. Every browser warns until that CA is
+#                             installed on each client machine.
+#
+# The default is EMPTY, i.e. a real certificate, because this deployment is
+# internet-facing. A self-signed certificate on the public internet trains users
+# to click through security warnings, which is worse than the problem it solves.
+#
+# There is deliberately no certbot container: Caddy's ACME client is built in,
+# and renewal is the part hand-rolled setups most often get wrong — it fails
+# silently 60 days later, at 3am, when nobody is looking.
+# ==============================================================================
+
+# Unset expands to nothing, which is Caddy's automatic-HTTPS default. That is
+# deliberate: an internet deployment that forgets to configure TLS fails LOUDLY
+# (ACME cannot validate, and Caddy says so) rather than quietly serving a
+# self-signed certificate to the public. Set CADDY_TLS="tls internal" for LAN.
+{$SERVER_HOST:localhost} {
+	{$CADDY_TLS}
+	encode gzip
+
+	# --- security headers, applied to EVERY response ------------------------
+	# Set at the edge because Caddy is the one component every response passes
+	# through: API responses from Django AND the static bundle, which Django
+	# never sees and therefore cannot add headers to.
+	header {
+		# CSP is the strongest control here — it is what turns an injected
+		# <script> from code execution into inert text.
+		#
+		# script-src 'self' only: no CDN, no inline <script>, no eval. The built
+		# bundle is a single self-hosted file, so nothing legitimate needs more.
+		#
+		# style-src allows 'unsafe-inline', which is a real if small concession:
+		# React sets inline style="" attributes (the skeleton loader's animation
+		# delays). Inline STYLE cannot execute JavaScript, so the residual risk
+		# is restyling, not code execution — unlike 'unsafe-inline' on
+		# script-src, which would defeat the policy entirely and is absent.
+		#
+		# connect-src 'self' keeps fetch/XHR/EventSource on this origin, so
+		# injected code cannot exfiltrate an answer to another host.
+		# frame-ancestors 'none' blocks clickjacking; form-action 'self' stops a
+		# form being retargeted at an attacker.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'"
+
+		# Belt and braces with frame-ancestors, for older browsers.
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+
+		# Switch off browser features this application never uses, so injected
+		# code cannot reach for them either.
+		Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+
+		# Keep this browsing context and its resources away from other origins.
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+
+		# Never advertise the server software.
+		-Server
+		-X-Powered-By
+	}
+
+	# --- API -> Django/gunicorn ---------------------------------------------
+	handle /api/* {
+		reverse_proxy backend:8000 {
+			# Server-sent events must not be buffered or the answer arrives in
+			# one lump at the end instead of streaming token by token.
+			flush_interval -1
+
+			# Answers legitimately take 20-90 seconds. Caddy's default read
+			# timeout would sever them mid-stream, so it is raised past the
+			# application-level timeout added in Phase 5.
+			transport http {
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
+	}
+
+	# --- Django's own static assets -----------------------------------------
+	# Collected by `collectstatic` in Phase 2 and served by WhiteNoise from the
+	# backend, so this simply proxies. Kept as a separate matcher so it never
+	# falls through to the SPA handler below and returns index.html for a
+	# missing stylesheet.
+	handle /static/* {
+		reverse_proxy backend:8000
+	}
+
+	# --- the compiled single-page application --------------------------------
+	handle {
+		root * /srv
+
+		# Hashed asset filenames are immutable, so they can be cached hard.
+		@hashed path_regexp ^/assets/.+\.[0-9a-f]{8,}\.(js|css|woff2?|png|svg|jpg)$
+		header @hashed Cache-Control "public, max-age=31536000, immutable"
+
+		# index.html must never be cached, or users keep loading an old bundle
+		# that references deleted asset files after a deploy.
+		@index path /index.html /
+		header @index Cache-Control "no-cache, no-store, must-revalidate"
+
+		# Client-side routing: unknown paths return the app shell, not a 404.
+		try_files {path} /index.html
+		file_server
+	}
+}

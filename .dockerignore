@@ -1,0 +1,38 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+# Applies to builds whose context is the repository root — currently only
+# docker/Dockerfile.caddy, which needs frontend/ to compile the static bundle
+# and nothing else. Everything not required by that build is excluded, both to
+# keep secrets out of the image and to keep the build context small.
+
+# --- secrets: must never enter an image layer --------------------------------
+.env
+.env.*
+!.env.example
+
+# --- version control / editor -------------------------------------------------
+.git
+.gitignore
+.vscode
+.idea
+.claude
+
+# --- other build contexts (not needed to compile the frontend) ----------------
+backend/
+sync_worker/
+db/
+
+# --- dependencies and build output --------------------------------------------
+**/node_modules
+**/dist
+**/__pycache__
+**/*.py[cod]
+
+# --- generated artefacts and documentation ------------------------------------
+copyright_submission/
+scripts/
+*.md
+LICENSE
+
+# frontend tests — dev-only, never shipped (the caddy image builds from repo root)
+frontend/src/__*__.jsx
+frontend/src/**/*.test.jsx

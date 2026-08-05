@@ -1,0 +1,29 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+# Keeps secrets, history and host build output out of the frontend image.
+
+# --- secrets ------------------------------------------------------------------
+.env
+.env.*
+
+# --- version control / editor -------------------------------------------------
+.git
+.gitignore
+.vscode
+.idea
+
+# --- dependencies and build output --------------------------------------------
+# node_modules is reinstalled inside the image for the correct platform; a host
+# copy (built on Windows) would be wrong and slow to transfer.
+node_modules
+dist
+.vite
+
+# --- documentation ------------------------------------------------------------
+*.md
+
+# --- tests: dev-only, never shipped -------------------------------------------
+# Vite would not bundle these (nothing imports them from the entry point), but
+# they should not be copied into the build context either. Same rule that keeps
+# sync_worker/test_embedding_pipeline.py out of the production image.
+src/__*__.jsx
+src/**/*.test.jsx

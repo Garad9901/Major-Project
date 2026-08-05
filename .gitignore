@@ -1,0 +1,44 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+
+# env — every environment file is ignored EXCEPT the committed example.
+# The broad .env* pattern is deliberate: it means a future .env.staging or
+# .env.backup is ignored by default rather than only after someone remembers to
+# add it. The negation for .env.example must come after the pattern that
+# excludes it, or git will not re-include it.
+.env
+.env.*
+!.env.example
+
+# Backups and copies of environment files, which is how secrets usually escape.
+*.env.bak
+.env.production.new
+
+# python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# node
+node_modules/
+dist/
+
+# docker volumes (bind-mounted data, if any)
+postgres_data/
+qdrant_data/
+ollama_data/
+
+# sync_worker runtime state (watermarks + change queue log)
+sync_worker/data/
+
+# experiment output (regenerated CSV/JSONL research results)
+backend/experiment_results/
+
+# database + vector backups (contain real student data; never commit)
+backups/
+*.dump
+*.snapshot
+
+# editor
+.vscode/
+.idea/
