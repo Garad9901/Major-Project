@@ -104,9 +104,32 @@ def fence_sql_rows(sql_result):
     if sql_result is None:
         return "Database rows: none."
     if sql_result.error:
+        # "treat as no data available" USED TO BE THE WORDING HERE, AND IT
+        # CAUSED THE MODEL TO STATE FALSEHOODS.
+        #
+        # A failed lookup and an empty result are not the same fact, and this
+        # line was telling the model they were. Asked "which faculty member has
+        # the most research publications, and what is their name?", the
+        # generated SQL referenced a column that does not exist and errored. The
+        # model, told to treat that as no data, answered:
+        #
+        #     "there are no records of faculty members with published research"
+        #
+        # against a table holding 13,000 such records. Verification passed it,
+        # because verification_agent was handed the same misleading sentence and
+        # so found the claim consistent with its evidence.
+        #
+        # That is the worst failure shape this system has: a confident, specific
+        # negative, delivered to a student, produced by a bug. "We could not
+        # look it up" is always available and is always true when the query
+        # broke, so the model is told to say that instead.
         return (
-            f"Database rows: query failed ({defang(sql_result.error)}) — "
-            f"treat as no data available."
+            f"Database lookup FAILED (error: {defang(sql_result.error)}).\n"
+            "This means the lookup could not be performed. It does NOT mean the "
+            "records are absent. Do NOT state or imply that no such records "
+            "exist, that the count is zero, or that nothing was found. Say only "
+            "that this information could not be retrieved right now, and answer "
+            "any other part of the question from the retrieved passages."
         )
     if not sql_result.rows:
         return (

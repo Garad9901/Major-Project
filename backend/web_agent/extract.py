@@ -60,12 +60,70 @@ _BLOCK_ELEMENTS = frozenset({
     "section", "article", "header", "footer", "blockquote", "pre", "table",
 })
 
+# CONTENT HIDDEN FROM HUMAN READERS IS DROPPED ENTIRELY.
+#
+# WHY THIS IS THE IMPORTANT CONTROL IN THIS MODULE
+# The injection patterns below are a blocklist, and the docstring is honest that
+# a blocklist will miss novel phrasings. This check is not a blocklist. It keys
+# on the one property that every practical web prompt-injection shares and that
+# no legitimate content shares: the text is invisible to the person the page was
+# written for, while remaining fully visible to a program that reads the markup.
+#
+# An audit against a simulated hostile calendar page found the sanitiser removing
+# 1 of 6 payloads. Five survived, and every one of them was delivered this way —
+# a display:none div, a font-size:0 paragraph, an aria-hidden span. A page can be
+# entirely legitimate to every human who visits it and still carry instructions
+# aimed only at this system, which is precisely the scenario that makes fetching
+# third-party pages risky.
+#
+# Nothing legitimate is lost: text a sighted visitor cannot read is not
+# information the college is publishing. (Screen-reader-only text — the
+# `.sr-only` clip pattern — is deliberately included in the drop, because it is
+# indistinguishable from the attack and never carries facts the visible page
+# omits.)
+_HIDDEN_STYLE_RE = re.compile(
+    r"(?:^|;)\s*(?:"
+    r"display\s*:\s*none"
+    r"|visibility\s*:\s*hidden"
+    r"|opacity\s*:\s*0(?:\.0+)?(?:\s|;|$)"
+    r"|font-size\s*:\s*0(?:px|pt|em|rem|%)?(?:\s|;|$)"
+    r"|text-indent\s*:\s*-\s*\d"
+    r"|(?:left|top)\s*:\s*-\s*\d{4,}"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_hidden(attrs):
+    """True when this element's own attributes hide it from a human reader."""
+    for name, value in attrs:
+        if value is None:
+            # Bare boolean attribute, e.g. <div hidden>
+            if name.lower() == "hidden":
+                return True
+            continue
+        lname = name.lower()
+        if lname == "hidden":
+            return True
+        if lname == "aria-hidden" and value.strip().lower() == "true":
+            return True
+        if lname == "style" and _HIDDEN_STYLE_RE.search(value):
+            return True
+    return False
+
 
 class _TextExtractor(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self._parts = []
         self._skip_depth = 0
+        # Names of currently-open non-void elements. Used to unwind correctly
+        # when a page leaves inner tags unclosed, which is extremely common.
+        self._stack = []
+        # Stack length at which the outermost hidden element opened, or None.
+        # Tracked by depth rather than by a counter so that a hidden subtree
+        # containing further hidden elements still un-hides exactly once.
+        self._hidden_at = None
 
     def handle_starttag(self, tag, attrs):
         if tag in _VOID_ELEMENTS:
@@ -73,6 +131,9 @@ class _TextExtractor(HTMLParser):
             if tag in _BLOCK_ELEMENTS:
                 self._parts.append("\n")
             return
+        self._stack.append(tag)
+        if self._hidden_at is None and _is_hidden(attrs):
+            self._hidden_at = len(self._stack)
         if tag in _SKIP_ELEMENTS:
             self._skip_depth += 1
         elif tag in _BLOCK_ELEMENTS:
@@ -81,8 +142,14 @@ class _TextExtractor(HTMLParser):
     def handle_startendtag(self, tag, attrs):
         # Explicitly self-closed (<br/>). Base class would call start then end,
         # which for a skip element would balance — but being explicit here keeps
-        # the depth logic in one place.
-        self.handle_starttag(tag, attrs)
+        # the depth logic in one place. A self-closed element encloses nothing,
+        # so it cannot hide anything and must not touch the stack.
+        if tag in _VOID_ELEMENTS:
+            if tag in _BLOCK_ELEMENTS:
+                self._parts.append("\n")
+            return
+        if tag in _BLOCK_ELEMENTS:
+            self._parts.append("\n")
 
     def handle_endtag(self, tag):
         if tag in _VOID_ELEMENTS:
@@ -91,9 +158,19 @@ class _TextExtractor(HTMLParser):
             self._skip_depth -= 1
         elif tag in _BLOCK_ELEMENTS:
             self._parts.append("\n")
+        if tag in self._stack:
+            # Unwind to the matching open tag, discarding any inner tags the
+            # page never closed. Without this the depth drifts upward on real
+            # pages and the hidden region would never be exited.
+            while self._stack:
+                popped = self._stack.pop()
+                if popped == tag:
+                    break
+        if self._hidden_at is not None and len(self._stack) < self._hidden_at:
+            self._hidden_at = None
 
     def handle_data(self, data):
-        if self._skip_depth == 0:
+        if self._skip_depth == 0 and self._hidden_at is None:
             self._parts.append(data)
 
     def text(self):
@@ -103,18 +180,48 @@ class _TextExtractor(HTMLParser):
 # Lines matching any of these are dropped. Case-insensitive, and tolerant of
 # padding characters used to slip past naive matching ("i g n o r e" is not
 # covered — again, this is depth, not a boundary).
+#
+# The determiner/possessive alternations below (`the|your|its|all`) and the
+# optional-colon forms are not padding: each corresponds to a payload that a
+# real audit watched walk straight through the previous version of this list.
+# Those misses are named individually so a future edit does not "simplify" them
+# back out.
 _INJECTION_PATTERNS = [
-    r"ignore\s+(all\s+)?(previous|prior|earlier|above)\s+(instructions?|prompts?|rules?)",
-    r"disregard\s+(all\s+)?(previous|prior|earlier|above|the)\s+",
+    # "ignore the above and instead ..." previously escaped: `above` had to be
+    # followed by instructions/prompts/rules, and here it is followed by "and".
+    r"ignore\s+(all\s+|the\s+)?(previous|prior|earlier|above)\b",
+    # "disregard YOUR previous instructions" previously escaped: `your` and
+    # `its` were absent from this alternation.
+    r"disregard\s+(all\s+|the\s+|your\s+|its\s+)?(previous|prior|earlier|above|the|your)\s+",
     r"forget\s+(everything|all|your)\s+(you|instructions?|rules?|above)",
-    r"you\s+are\s+now\s+(a|an|in)\s+",
-    r"\b(system|developer|assistant)\s*(prompt|message|role)\s*[:=]",
+    # "You are now DAN." previously escaped: a/an/in were required to follow.
+    # NOT widened to a bare "you are now" — a college page saying "you are now
+    # eligible to apply" is ordinary prose, and stripping it would delete real
+    # information. The alternation covers the role-reassignment framings only.
+    r"you\s+are\s+now\s+(a|an|in|(?-i:DAN)|operating|acting|running|free|"
+    r"unrestricted|no\s+longer|allowed\s+to|permitted\s+to)\b",
+    # "### SYSTEM PROMPT OVERRIDE ###" previously escaped: a colon or equals was
+    # required after the noun. Made optional.
+    r"\b(system|developer|assistant)\s*(prompt|message|role)\b\s*[:=]?",
     r"new\s+(instructions?|rules?|system\s+prompt)\s*[:=]",
     r"(respond|reply|answer|output)\s+(only\s+)?with\s+(exactly\s+)?[\"']",
     r"do\s+not\s+(tell|mention|reveal|disclose)\s+(the\s+)?(user|anyone)",
+    # Left narrow deliberately. A bare \boverride\b would strip a college page
+    # describing a "manual override" procedure. The payload that motivated
+    # widening this ("### SYSTEM PROMPT OVERRIDE ###") is already caught by the
+    # system/prompt pattern above, so nothing is lost by keeping it specific.
     r"\boverride\s+(your|all|previous|the)\s+",
-    r"\b(jailbreak|DAN\s+mode|developer\s+mode)\b",
+    # (?-i:DAN) keeps this one CASE-SENSITIVE inside an otherwise
+    # case-insensitive union: a bare case-insensitive "dan" would strip any line
+    # mentioning someone named Dan.
+    r"\b(jailbreak|(?-i:DAN)|developer\s+mode|unrestricted\s+(agent|mode))\b",
     r"end\s+of\s+(context|document|data)\s*[.:]?\s*(now|then)\b",
+    # Imperatives aimed at the reading model. "You must now execute: SELECT ..."
+    # matched nothing at all before.
+    r"\byou\s+(must|should|will|need\s+to)\s+(now\s+)?(execute|run|output|print|reveal|ignore|disregard)\b",
+    r"\b(reveal|disclose|print|output|repeat)\s+(your|the)\s+(system\s+)?(prompt|instructions?|rules?)",
+    # An instruction addressed to the assistant by name.
+    r"^\s*(assistant|ai|model|chatbot)\s*[,:]\s*(please\s+)?\w+",
     r"<<<\s*/?\s*(end_?)?untrusted",     # our own fence markers
     r"\[\s*/?\s*(system|inst|instruction)\s*\]",
     r"<\|.*?\|>",                         # chat-template control tokens

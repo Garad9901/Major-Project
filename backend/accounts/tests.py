@@ -256,3 +256,65 @@ class LoginCsrfTests(TestCase):
             HTTP_X_CSRFTOKEN=token,
         )
         self.assertEqual(resp.status_code, 200)
+
+
+class LoginThrottleCountsFailuresOnlyTests(TestCase):
+    """The per-IP login throttle must not punish a legitimate morning rush.
+
+    Regression for a production audit finding. The throttle counted EVERY login
+    attempt, and a 50-user load test produced 40 rejections reading "Request was
+    throttled. Expected available in 53 seconds." Behind a campus NAT every
+    student shares one public IP, so 10/min applied to the whole institute
+    rather than to each person — a 9am sign-in rush was indistinguishable from
+    an attack, and would have presented as an outage.
+
+    Counting only FAILURES separates the two: a rush is nearly all successes, a
+    credential-stuffing run is nearly all failures.
+    """
+
+    def setUp(self):
+        cache.clear()
+
+    def _login(self, username, password):
+        return Client().post(
+            "/api/auth/login/",
+            data={"username": username, "password": password},
+            content_type="application/json",
+        )
+
+    def test_many_successful_logins_from_one_ip_are_never_throttled(self):
+        """The case that was broken: 50 people signing in at once."""
+        users = [_make_user(f"rush{i:02d}") for i in range(50)]
+        for i, _u in enumerate(users):
+            resp = self._login(f"rush{i:02d}", PW)
+            self.assertEqual(
+                resp.status_code, 200,
+                f"user {i} was rejected with {resp.status_code}: {resp.content[:120]}",
+            )
+
+    def test_repeated_failures_from_one_ip_are_still_throttled(self):
+        """The protection must survive the fix."""
+        _make_user("victim")
+        codes = [self._login("victim", "wrong-password").status_code for _ in range(14)]
+        self.assertIn(429, codes, f"no 429 in 14 failed attempts: {codes}")
+        # The first ten are charged, the rest are refused outright.
+        self.assertEqual(codes[:10], [401] * 10, codes)
+
+    def test_failures_against_unknown_usernames_are_also_charged(self):
+        """Otherwise guessing usernames would be a free budget."""
+        codes = [self._login(f"nobody{i}", "x").status_code for i in range(14)]
+        self.assertIn(429, codes, f"no 429 for unknown usernames: {codes}")
+
+    def test_a_success_does_not_clear_an_existing_failure_budget(self):
+        """A valid credential must not be usable to reset the counter and keep
+        guessing — otherwise one known-good account launders unlimited attempts
+        against every other one."""
+        _make_user("honest")
+        _make_user("target")
+        for _ in range(9):
+            self.assertEqual(self._login("target", "wrong-password").status_code, 401)
+        # A genuine sign-in in the middle of that run.
+        self.assertEqual(self._login("honest", PW).status_code, 200)
+        # The tenth failure exhausts the budget; the eleventh is refused.
+        self.assertEqual(self._login("target", "wrong-password").status_code, 401)
+        self.assertEqual(self._login("target", "wrong-password").status_code, 429)

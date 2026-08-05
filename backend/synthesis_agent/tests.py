@@ -147,4 +147,36 @@ class FenceSqlRowsTests(SimpleTestCase):
     def test_no_rows_and_error_paths(self):
         self.assertIn("none", fence_sql_rows(None))
         self.assertIn("no rows", fence_sql_rows(_SqlResult(rows=[])))
-        self.assertIn("query failed", fence_sql_rows(_SqlResult(error="boom")))
+
+        rendered = fence_sql_rows(_SqlResult(error="boom"))
+        self.assertIn("FAILED", rendered)
+        self.assertIn("boom", rendered)
+
+    def test_a_failed_query_is_not_described_as_an_absence_of_records(self):
+        """A broken lookup and an empty result are DIFFERENT facts.
+
+        Regression for a production audit finding. This branch used to end with
+        "treat as no data available", and the model did exactly that: asked which
+        faculty member had the most publications, it hit a bad-column error and
+        answered "there are no records of faculty members with published
+        research" — against a table of 13,000 such records. Verification passed
+        it, having been handed the same wording.
+
+        Asserting on behaviour rather than phrasing: the rendered text must tell
+        the model NOT to claim absence, and must not itself suggest emptiness.
+        """
+        rendered = fence_sql_rows(_SqlResult(error='column "x" does not exist'))
+
+        # It must actively forbid the false negative.
+        low = rendered.lower()
+        self.assertIn("does not mean", low)
+        self.assertIn("not state or imply", low)
+
+        # And it must not use the phrases that caused the failure.
+        self.assertNotIn("no data available", low)
+        self.assertNotIn("treat as no data", low)
+
+        # The empty-result branch, by contrast, SHOULD still describe emptiness —
+        # that one really is an absence of matching records.
+        empty = fence_sql_rows(_SqlResult(rows=[])).lower()
+        self.assertIn("no rows", empty)

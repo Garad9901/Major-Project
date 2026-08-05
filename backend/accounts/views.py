@@ -28,6 +28,13 @@ logger = logging.getLogger("accounts")
 
 
 def _client_ip(request):
+    # Used only for log lines here (failed logins, lockouts), not for any
+    # security decision — the per-IP throttle keys off DRF's own get_ident(),
+    # which reads the LAST hop via NUM_PROXIES=1.
+    #
+    # Trusting hop [0] is safe only because Caddy replaces a client-supplied
+    # X-Forwarded-For rather than appending to it. See the fuller note on the
+    # identical function in orchestrator/views.py before changing the proxy.
     forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
     if forwarded:
         return forwarded.split(",")[0].strip()
@@ -112,12 +119,21 @@ def login(request):
                           f"or ask an administrator to reset it."},
                 status=423,  # Locked
             )
+        # Wrong password against a locked account: still a failed attempt, so it
+        # still counts towards the per-IP budget. See LoginRateThrottle.
+        LoginRateThrottle.record_failure(request)
         return Response({"error": "Invalid username or password."}, status=401)
 
     if user is None:
         # Logged so repeated failures against one account or from one address
         # are visible. The attempted password is deliberately never recorded.
         logger.warning("failed login attempt username=%r ip=%s", username[:150], client_ip)
+        # TWO SEPARATE COUNTERS, deliberately, and both are charged here:
+        #   per-IP      caps one SOURCE spraying many accounts (this throttle)
+        #   per-ACCOUNT caps one ACCOUNT being ground down from anywhere (below)
+        # The per-IP one is charged for unknown usernames too — an attacker
+        # guessing usernames must not get a free budget by guessing wrong ones.
+        LoginRateThrottle.record_failure(request)
         if profile is not None:
             lockout.record_failure(profile, username, client_ip)
         # Deliberately identical response for "no such user", "wrong password",

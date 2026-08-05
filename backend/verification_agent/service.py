@@ -27,7 +27,19 @@ def _format_sql_section(sql_result):
     if sql_result is None:
         return "SQL data: none."
     if sql_result.error:
-        return f"SQL data: query failed ({sql_result.error}) — treat as no data available."
+        # Mirrors the fix in synthesis_agent/untrusted.py — see the long note
+        # there. The verifier must know the difference between "the lookup
+        # broke" and "there is nothing there", or it will confirm a false
+        # negative as supported. It did exactly that: an answer asserting "there
+        # are no records of faculty members with published research" was passed
+        # with 0 claims flagged, against a table of 13,000 records.
+        return (
+            f"SQL data: the query FAILED with an error ({sql_result.error}).\n"
+            "No data was retrieved, and nothing is known either way about "
+            "whether matching records exist. Any claim in the answer that such "
+            "records do NOT exist, that a count is zero, or that nothing was "
+            "found is UNSUPPORTED — the failure is not evidence of absence."
+        )
     if not sql_result.rows:
         return f"SQL data: query ran successfully but returned no rows.\nQuery: {sql_result.generated_sql}"
     lines = [f"SQL data (from query: {sql_result.generated_sql}):", f"columns: {sql_result.columns}"]

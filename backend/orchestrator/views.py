@@ -40,7 +40,26 @@ def _sse(event, data):
 
 
 def _client_ip(request):
-    # Behind the Caddy proxy the real client is the first X-Forwarded-For hop.
+    """The client address recorded in the audit log.
+
+    TAKING HOP [0] IS SAFE HERE ONLY BECAUSE OF CADDY'S BEHAVIOUR, NOT BECAUSE
+    THE FIRST HOP IS INHERENTLY TRUSTWORTHY.
+
+    A client can send its own X-Forwarded-For. Whether that value survives to
+    here depends entirely on the proxy in front: Caddy (>= 2.7) REPLACES the
+    header for a peer that is not in `trusted_proxies`, so a forged hop never
+    arrives. Verified against this deployment on Caddy 2.11.4 — a request
+    carrying `X-Forwarded-For: 203.0.113.99` was recorded with the real address.
+
+    nginx configured the usual way (`proxy_add_x_forwarded_for`) APPENDS
+    instead, and under that proxy this function would return the attacker's
+    chosen string and write it into the audit log — the record OPERATIONS.md
+    tells an investigator to rely on. If the reverse proxy is ever changed,
+    change this to read the LAST hop, which is the one the proxy itself
+    appended. (DRF's throttle already reads the last hop, via NUM_PROXIES=1 in
+    settings/base.py — the two are deliberately consistent in intent, and were
+    inconsistent in mechanism.)
+    """
     forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
     if forwarded:
         return forwarded.split(",")[0].strip()

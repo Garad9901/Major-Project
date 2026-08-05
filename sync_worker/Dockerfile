@@ -16,7 +16,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Upgrade pip itself before installing anything — same fix, same reason, as
+# backend/Dockerfile.
+#
+# That fix was applied to the backend image only, and this image was missed:
+# pip-audit against the running sync_worker reported 6 known vulnerabilities,
+# all of them in pip 25.0.1 (the version baked into python:3.12-slim) and none
+# in an application dependency. The backend, already carrying this line, came
+# back clean. Scanning one image of a multi-image stack is how that kind of gap
+# survives — audit every image, not just the one serving traffic.
+#
+# Pinned rather than bare `--upgrade` so a rebuild is reproducible.
+RUN pip install --no-cache-dir --upgrade "pip>=26.1.2" \
+    && pip install --no-cache-dir -r requirements.txt
 
 
 # --- production ---------------------------------------------------------------

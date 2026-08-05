@@ -26,6 +26,7 @@ touches the database makes the status page useless too.
 """
 
 import logging
+import os
 import time
 
 from django.db import connections
@@ -70,11 +71,70 @@ def _readonly_role():
             return cur.fetchone() is not None
 
 
+# How far the index may lag the database before it is called stale. The worker
+# polls every SYNC_WORKER_POLL_INTERVAL_SECONDS (30 by default), so a few
+# minutes of tolerance keeps a normal cycle — or one slow re-embed — from
+# flapping the dashboard, while still catching a worker that has actually died.
+_STALENESS_TOLERANCE_SECONDS = int(os.getenv("SYNC_STALENESS_TOLERANCE", "600"))
+
+# The table this check measures. Descriptive, embedded, and the one the RAG path
+# actually retrieves from, so its freshness is what users experience.
+_FRESHNESS_TABLE = "faculty_development_profiles"
+
+
+def _index_is_fresh():
+    """Is the search index still keeping up with the database?
+
+    WHY THIS CHECK EXISTS, AND WHY PINGING THE WORKER WOULD NOT DO
+    Every other row on this page is a liveness probe, and during the audit all
+    of them stayed green while the sync worker was stopped outright — the page
+    said "All systems operational" with nothing syncing at all. It also said
+    that while the worker was in a crash loop on a corrupt state file. In both
+    cases the first sign of trouble would have been a user quietly receiving
+    last week's answer.
+
+    This compares what the index holds against what the database holds, so it
+    reports the thing that actually matters. It catches a stopped worker, a
+    crash-looping worker, AND a worker that is running but wedged — which a
+    container healthcheck or a liveness ping cannot distinguish from healthy.
+
+    Deliberately fails OPEN. If either side cannot be read, this returns True
+    rather than painting the page red: Qdrant and Postgres each have their own
+    row above, and a second alarm for an outage already reported is noise. This
+    row answers one question only — given that both are up, is the index current.
+    """
+    with connections["default"].cursor() as cur:
+        cur.execute(f"SELECT max(updated_at) FROM {_FRESHNESS_TABLE};")  # noqa: S608 - constant
+        row = cur.fetchone()
+    db_newest = row[0] if row else None
+    if db_newest is None:
+        return True  # nothing to sync yet
+
+    index_newest = vector_store.newest_indexed_updated_at(_FRESHNESS_TABLE)
+    if index_newest is None:
+        # Either Qdrant is unreachable (its own row covers that) or the table has
+        # never been indexed. The latter is genuinely wrong, but only once there
+        # is something to index — and there is, since db_newest is not None.
+        return False
+
+    lag = (db_newest - index_newest).total_seconds()
+    if lag > _STALENESS_TOLERANCE_SECONDS:
+        logger.warning(
+            "search index is stale: %s newest row is %.0fs ahead of the newest "
+            "indexed point (tolerance %ss) — is sync_worker running?",
+            _FRESHNESS_TABLE, lag, _STALENESS_TOLERANCE_SECONDS,
+        )
+        return False
+    return True
+
+
 CHECKS = [
     ("Database", _database, "Postgres — records, accounts and history"),
     ("Read-only DB role", _readonly_role, "The restricted account the assistant queries with"),
     ("Language model", ollama.ping, "Ollama — answers questions"),
     ("Search index", vector_store.ping, "Qdrant — finds descriptive content"),
+    ("Index freshness", _index_is_fresh,
+     "Whether sync_worker is still copying database changes into the search index"),
 ]
 
 # What to do about each, shown only when that component is down. An operator
@@ -84,6 +144,11 @@ REMEDY = {
     "Read-only DB role": "Restart the backend; it recreates the role and its grants on startup.",
     "Language model": "docker compose ... restart ollama. First start after a restart is slow while the model loads.",
     "Search index": "docker compose ... restart qdrant. Descriptive answers degrade; database answers keep working.",
+    "Index freshness": (
+        "sync_worker has stopped keeping up. Check `docker compose ps sync_worker` "
+        "and `docker compose logs --tail 50 sync_worker`. Answers are still being "
+        "given, but descriptive ones may be out of date."
+    ),
 }
 
 _PAGE = """<!doctype html>

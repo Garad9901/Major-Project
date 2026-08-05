@@ -80,5 +80,74 @@ const evil = renderToStaticMarkup(
 check("embedded <script> is NOT rendered as a tag", !/<script/i.test(evil));
 check("embedded <img onerror> is NOT rendered as a tag", !/<img/i.test(evil));
 
+// ---------------------------------------------------------------------------
+// EVERYTHING AT ONCE, WITH NESTING
+// ---------------------------------------------------------------------------
+// The sample above exercises each construct in isolation and side by side, but
+// every list in it is FLAT. Nesting is where markdown renderers actually break:
+// an indented sub-list, a fenced block indented INSIDE a list item, and a table
+// following a list are all cases where a mis-set `tightness` or a missing
+// remark-gfm plugin silently emits the raw source instead of elements.
+//
+// Real answers from this assistant do produce this shape — "how many faculty by
+// department, broken down by rank" comes back as a nested list next to a table.
+const NESTED = `Here is the **combined breakdown**:
+
+- Engineering
+  - Professors: 331
+  - Lecturers: 402
+    - Of whom \`Expert\` competency: 27
+- Medicine
+  - Professors: 118
+
+1. First step
+   1. Nested step one
+   2. Nested step two
+2. Second step
+
+| Rank | Count |
+| --- | --- |
+| Professor | 1552 |
+| Lecturer | 3053 |
+
+\`\`\`python
+def total(rows):
+    return sum(r["count"] for r in rows)
+\`\`\`
+
+> A blockquote closing the answer.
+`;
+
+const nested = renderToStaticMarkup(<Markdown>{NESTED}</Markdown>);
+const nestedVisible = nested
+  .replace(/<[^>]+>/g, "")
+  .replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&amp;/g, "&")
+  .replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+
+console.log("\n--- nested lists + table + code block in ONE response ---");
+// A <ul> appearing inside an <li> is the actual structural assertion; matching
+// on indentation in the source would prove nothing about the output.
+check("nested <ul> inside an <li>", /<li[^>]*>[\s\S]*?<ul[^>]*>[\s\S]*?<li[^>]*>/.test(nested));
+check("nested <ol> inside an <li>", /<li[^>]*>[\s\S]*?<ol[^>]*>[\s\S]*?<li[^>]*>/.test(nested));
+check("three-deep nesting survives", /Of whom/.test(nested) && (nested.match(/<ul/g) || []).length >= 3);
+check("table still renders alongside lists", /<table[^>]*>[\s\S]*?<th[^>]*>Rank<\/th>/.test(nested));
+check("code block still renders alongside lists", /<pre[^>]*>[\s\S]*?<code[^>]*>[\s\S]*?def total/.test(nested));
+check("inline code inside a nested item", /<code[^>]*>Expert<\/code>/.test(nested));
+check("blockquote renders as <blockquote>", /<blockquote[^>]*>/.test(nested));
+
+console.log("\n--- nested response leaves NO raw markdown visible ---");
+check("no ** markers", !nestedVisible.includes("**"), JSON.stringify(nestedVisible.match(/.{0,20}\*\*.{0,20}/)?.[0] || ""));
+check("no ``` fences", !nestedVisible.includes("```"));
+check("no backticks", !nestedVisible.includes("`"), JSON.stringify(nestedVisible.match(/.{0,20}`.{0,20}/)?.[0] || ""));
+check("no '- ' bullets", !/(^|\n)\s*-\s/.test(nestedVisible), JSON.stringify(nestedVisible.match(/(^|\n)\s*-\s.{0,25}/)?.[0] || ""));
+check("no '|' table pipes", !nestedVisible.includes("|"), JSON.stringify(nestedVisible.match(/.{0,20}\|.{0,20}/)?.[0] || ""));
+check("no '>' quote markers", !/(^|\n)\s*>\s/.test(nestedVisible));
+check("no ordered-list source markers", !/(^|\n)\s*\d+\.\s/.test(nestedVisible), JSON.stringify(nestedVisible.match(/(^|\n)\s*\d+\.\s.{0,25}/)?.[0] || ""));
+
+console.log("\n--- nested response keeps its content ---");
+check("keeps deepest item text", nestedVisible.includes("Of whom"));
+check("keeps table cell", nestedVisible.includes("3053"));
+check("keeps code body", nestedVisible.includes("def total"));
+
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);
 if (fail > 0) process.exitCode = 1;

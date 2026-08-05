@@ -235,6 +235,44 @@ seconds there. They are compensating for CPU-only inference, nothing else.
 
 ---
 
+## Running the automated tests
+
+### Backend (75 tests)
+
+```bash
+docker compose exec -T backend python manage.py test
+```
+
+Covers the SQL guard, the prompt-injection fencing, cross-user isolation, the
+login lockout, the web-fetch allowlist and the content sanitiser. Takes about
+30 seconds. Everything must pass before a deploy.
+
+### Frontend markdown rendering (36 assertions)
+
+`frontend/src/__markdown_test__.jsx` renders the `<Markdown>` component to
+static HTML and asserts that bold, nested lists, tables, code blocks and
+blockquotes all become real elements, that **no raw markdown punctuation is left
+visible**, and that embedded `<script>` / `<img onerror>` are never emitted as
+tags.
+
+It is not part of `npm test` because it needs no browser and no test runner —
+esbuild plus Node is the whole harness:
+
+```bash
+docker compose exec -T frontend sh -c \
+  "cd /app && npx --yes esbuild src/__markdown_test__.jsx --bundle \
+     --platform=node --format=cjs --outfile=/tmp/mdtest.cjs \
+     --loader:.jsx=jsx --jsx=automatic --log-level=error && node /tmp/mdtest.cjs"
+```
+
+Exit code is non-zero if any assertion fails.
+
+> The file lives in `src/` but is never shipped: nothing imports it, so the
+> bundler drops it, and `.dockerignore` excludes `frontend/src/__*__.jsx` from
+> the production build context. Both were verified.
+
+---
+
 ## When you need to ask for help
 
 Copy the output of both of these and send it to your technical contact:
