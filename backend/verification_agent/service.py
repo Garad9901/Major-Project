@@ -5,7 +5,7 @@ import logging
 import re
 import uuid
 
-from . import llm_client
+from . import fast_check, llm_client
 from .models import VerificationLog
 
 logger = logging.getLogger("verification_agent")
@@ -83,21 +83,52 @@ def _format_web_section(web_pages):
 
 
 def _parse_claims(raw_output):
+    """Parse the verifier's verdict into a claim list.
+
+    Accepts BOTH shapes:
+
+      new  {"checked": 13, "unsupported": [...]}   only problems are listed
+      old  {"claims": [{"supported": true, ...}]}  every claim listed
+
+    The old shape is still accepted because a model does not always follow a
+    changed instruction on the first try, and falling back to "0 claims parsed"
+    would silently mean "nothing was checked" — which reads downstream as a
+    clean pass. Tolerating both is the difference between a formatting wobble
+    and an unnoticed loss of verification.
+
+    Returns (claims, checked_count). `claims` holds only the flagged ones under
+    the new shape; `checked_count` is how many the model says it examined.
+    """
     text = _CODE_FENCE_RE.sub("", raw_output).strip()
     try:
         parsed = json.loads(text)
-        raw_claims = parsed.get("claims", [])
     except (json.JSONDecodeError, AttributeError) as exc:
         logger.warning("failed to parse verification output raw=%r error=%s", raw_output, exc)
-        return []
+        return [], 0
+
+    if not isinstance(parsed, dict):
+        logger.warning("verification output was not an object: %r", raw_output[:200])
+        return [], 0
+
+    if "unsupported" in parsed:
+        raw_claims = parsed.get("unsupported") or []
+        checked = int(parsed.get("checked") or len(raw_claims))
+        default_supported = False
+    else:
+        raw_claims = parsed.get("claims") or []
+        checked = len(raw_claims)
+        default_supported = None  # must come from the entry itself
 
     claims = []
     for c in raw_claims:
         try:
+            supported = (
+                default_supported if default_supported is not None else bool(c["supported"])
+            )
             claims.append(
                 {
                     "text": str(c["text"]),
-                    "supported": bool(c["supported"]),
+                    "supported": supported,
                     "confidence": float(c.get("confidence", 0.5)),
                     "evidence": str(c.get("evidence", "")),
                     "correct_value": c.get("correct_value") or None,
@@ -105,7 +136,7 @@ def _parse_claims(raw_output):
             )
         except (KeyError, TypeError, ValueError):
             logger.warning("skipping malformed claim entry: %r", c)
-    return claims
+    return claims, max(checked, len(claims))
 
 
 def verify_and_correct(question, route, answer, sql_result=None, rag_chunks=None,
@@ -116,6 +147,39 @@ def verify_and_correct(question, route, answer, sql_result=None, rag_chunks=None
     if any claim was flagged, produces a corrected final answer — either
     fixed from source data, or annotated as unverifiable.
     """
+    # TIER 1 — can this be settled by direct matching, with no LLM call at all?
+    # Declines on anything it cannot check exhaustively; see fast_check.py for
+    # the conditions and why each one is there.
+    fast = fast_check.try_fast_check(
+        question, answer, sql_result=sql_result, rag_chunks=rag_chunks,
+        web_pages=web_pages,
+    )
+    if fast.decided:
+        run_id = uuid.uuid4()
+        VerificationLog.objects.bulk_create([
+            VerificationLog(
+                run_id=run_id, question=question, route=route,
+                original_answer=answer, final_answer=answer,
+                claim_text=claim["text"], supported=True,
+                confidence=claim["confidence"], evidence=claim["evidence"],
+                action_taken="passed_fast",
+            )
+            for claim in fast.claims
+        ])
+        result = VerificationResult(
+            question=question, original_answer=answer, final_answer=answer,
+            claims=fast.claims, was_corrected=False,
+        )
+        result.run_id = run_id
+        result.fast_path = True
+        logger.info(
+            "question=%r claims=%d flagged=0 tier=fast (%s) run_id=%s",
+            question, len(fast.claims), fast.reason, run_id,
+        )
+        return result
+
+    logger.info("verification tier=llm for %r (%s)", question[:60], fast.reason)
+
     sql_section = _format_sql_section(sql_result)
     rag_section = _format_rag_section(rag_chunks)
     # Appended to the RAG section rather than added as a fourth prompt parameter,
@@ -125,7 +189,7 @@ def verify_and_correct(question, route, answer, sql_result=None, rag_chunks=None
         rag_section = f"{rag_section}\n\n{web_section}"
 
     raw_output = llm_client.verify_claims(question, answer, sql_section, rag_section)
-    claims = _parse_claims(raw_output)
+    claims, checked_count = _parse_claims(raw_output)
 
     flagged_claims = [c for c in claims if not c["supported"]]
 
@@ -158,11 +222,26 @@ def verify_and_correct(question, route, answer, sql_result=None, rag_chunks=None
                 action_taken=action,
             )
         )
+    # One summary row when nothing was flagged, so the "how many claims were
+    # examined" metric survives the switch to a problems-only verdict. Without
+    # it a clean run would write no rows at all and be indistinguishable from a
+    # run that never happened.
+    if not log_rows and checked_count:
+        log_rows.append(
+            VerificationLog(
+                run_id=run_id, question=question, route=route,
+                original_answer=answer, final_answer=final_answer,
+                claim_text=f"{checked_count} claim(s) examined, none unsupported",
+                supported=True, confidence=1.0,
+                evidence="verifier reported no unsupported claims",
+                action_taken="passed",
+            )
+        )
     VerificationLog.objects.bulk_create(log_rows)
 
     logger.info(
-        "question=%r claims=%d flagged=%d corrected=%s run_id=%s",
-        question, len(claims), len(flagged_claims), final_answer != answer, run_id,
+        "question=%r checked=%d flagged=%d corrected=%s tier=llm run_id=%s",
+        question, checked_count, len(flagged_claims), final_answer != answer, run_id,
     )
 
     result = VerificationResult(
@@ -173,4 +252,6 @@ def verify_and_correct(question, route, answer, sql_result=None, rag_chunks=None
         was_corrected=(final_answer != answer),
     )
     result.run_id = run_id
+    result.fast_path = False
+    result.checked_count = checked_count
     return result

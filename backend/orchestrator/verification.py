@@ -140,9 +140,14 @@ def verify(question, route, answer, sql_result=None, rag_chunks=None, web_pages=
     flagged = [c for c in result.claims if not c["supported"]]
     meta = {
         "verification": "ran",
-        "claims_checked": len(result.claims),
+        # How many claims were EXAMINED, which since the switch to a
+        # problems-only verdict is no longer the same as len(result.claims) —
+        # that now counts flagged claims on the LLM tier.
+        "claims_checked": getattr(result, "checked_count", None) or len(result.claims),
         "claims_flagged": len(flagged),
         "corrected": result.was_corrected,
+        # Which tier settled it: direct matching (no LLM) or the model.
+        "tier": "fast" if getattr(result, "fast_path", False) else "llm",
         "run_id": str(result.run_id) if result.run_id else None,
     }
 

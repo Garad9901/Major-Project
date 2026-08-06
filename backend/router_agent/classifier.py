@@ -4,7 +4,15 @@ import json
 import logging
 import re
 
-from . import llm_client
+from . import fast_router, llm_client
+
+
+def embed_text(text):
+    """Imported lazily so router_agent does not import rag_agent at module load
+    (rag_agent pulls in the Qdrant client, which this module does not need
+    unless the embedding tier is actually reached)."""
+    from rag_agent.embedder import embed_text as _embed
+    return _embed(text)
 
 logger = logging.getLogger("router_agent")
 
@@ -33,9 +41,33 @@ class RouteResult:
 
 
 def classify(question):
-    """Classifies a question as SQL / RAG / BOTH. Does not call either agent
-    — this is routing decision-making only, kept deliberately separate so it
-    can be reviewed on its own before anything gets wired to it."""
+    """Decide the route. Does not call any downstream agent.
+
+    THREE TIERS, and the LLM is the last one — see router_agent/fast_router.py.
+    Measured before this change: the LLM router cost 5.2-9.1s warm (and 60s
+    cold) to emit about twenty tokens of JSON, because the prompt it reads is
+    ~1,200 tokens of worked examples and it was reading them with a 7B model.
+    The first two tiers answer the overwhelming majority of questions in
+    microseconds or tens of milliseconds.
+
+    A misroute is cheap and recoverable: it yields a worse answer, never an
+    unsafe one. Routing grants no capability — the SQL guard, the table
+    allowlist and the read-only role are all downstream of this and unaffected
+    by what it returns.
+    """
+    if fast_router.FAST_ROUTER_ENABLED:
+        route, reason, confident = fast_router.classify_by_rules(question)
+        if confident:
+            logger.info("question=%r route=%s tier=rules reason=%s", question, route, reason)
+            return RouteResult(question, route=route, reason=reason)
+
+        route, reason, confident = fast_router.classify_by_embedding(question, embed_text)
+        if confident:
+            logger.info("question=%r route=%s tier=embedding reason=%s", question, route, reason)
+            return RouteResult(question, route=route, reason=reason)
+
+        logger.info("router: tiers 1-2 unconfident for %r, falling back to the LLM", question[:60])
+
     raw_output = llm_client.classify_question(question)
     text = _CODE_FENCE_RE.sub("", raw_output).strip()
 

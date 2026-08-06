@@ -17,6 +17,7 @@ from web_agent.service import fetch_for_question
 
 from . import cache, verification
 from .concurrency import llm_slot
+from .profiling import Profile
 
 logger = logging.getLogger("orchestrator")
 
@@ -57,15 +58,20 @@ def _resolve_route(question):
     return route_result.route, route_result.reason
 
 
-def _run_sql(question):
-    return sql_ask(question, execute=True)
+def _run_sql(question, profile):
+    # Timed INSIDE the worker thread, not around pool.submit(), so the recorded
+    # interval is when the work actually ran rather than when it was queued.
+    # That distinction is the whole point when proving the two branches overlap.
+    with profile.stage("sql"):
+        return sql_ask(question, execute=True)
 
 
-def _run_rag(question):
-    return retrieve(question, top_k=RAG_TOP_K)
+def _run_rag(question, profile):
+    with profile.stage("rag"):
+        return retrieve(question, top_k=RAG_TOP_K)
 
 
-def _gather_sources(question, route):
+def _gather_sources(question, route, profile=None):
     """Fetch SQL and/or RAG data for the route, degrading gracefully when ONE
     source is down. Returns (sql_result, rag_chunks, effective_route, notes).
 
@@ -80,25 +86,27 @@ def _gather_sources(question, route):
     sql_result = None
     rag_chunks = None
     notes = []
+    profile = profile or Profile()
 
     if route == "WEB":
         # The web agent NEVER raises for an unreachable page: it logs the
         # failure and returns fewer pages. So an empty list here means "no
         # allowlisted page matched, or none could be read", and the honest
         # fallback is the database rather than an error.
-        pages = fetch_for_question(question)
+        with profile.stage("web_fetch"):
+            pages = fetch_for_question(question)
         if pages:
             return None, None, "WEB", notes, pages
         logger.info("WEB route produced no pages; falling back to SQL for %r", question[:60])
         notes.append(WEB_EMPTY_NOTE)
-        sql_result = _run_sql(question)
+        sql_result = _run_sql(question, profile)
         return sql_result, None, "SQL", notes, []
 
     if needs_sql and needs_rag:
         # Independent I/O — run concurrently, but tolerate either one failing.
         with ThreadPoolExecutor(max_workers=2) as pool:
-            f_sql = pool.submit(_run_sql, question)
-            f_rag = pool.submit(_run_rag, question)
+            f_sql = pool.submit(_run_sql, question, profile)
+            f_rag = pool.submit(_run_rag, question, profile)
             try:
                 sql_result = f_sql.result()
             except DatabaseUnavailable as exc:
@@ -120,16 +128,16 @@ def _gather_sources(question, route):
         return sql_result, rag_chunks, effective, notes, []
 
     if needs_sql:  # SQL-only — a DB outage here is fatal (no source to fall back on)
-        sql_result = _run_sql(question)
+        sql_result = _run_sql(question, profile)
         return sql_result, None, "SQL", notes, []
 
     # RAG-only
     try:
-        rag_chunks = _run_rag(question)
+        rag_chunks = _run_rag(question, profile)
     except VectorStoreUnavailable:
         # Try SQL as a fallback; use it only if it actually found something.
         logger.warning("RAG source down (route=RAG), attempting SQL fallback")
-        fallback = _run_sql(question)
+        fallback = _run_sql(question, profile)
         if fallback.rows:
             notes.append(RAG_DOWN_SQL_FALLBACK_NOTE)
             return fallback, None, "SQL", notes, []
@@ -245,9 +253,21 @@ def answer_question_stream(question):
 def _generate_stream(question):
     """The real pipeline. Separated so the coalescing wrapper above stays
     readable and so `finally` cleanup is unambiguous."""
+    profile = Profile()
     with llm_slot(label=f"stream q={question[:40]!r}"):
-        route, reason = _resolve_route(question)
-        sql_result, rag_chunks, effective_route, notes, web_pages = _gather_sources(question, route)
+        profile.mark("slot_acquired")
+        with profile.stage("router"):
+            route, reason = _resolve_route(question)
+
+        # Emitted BEFORE the data stages, which are the slow part. The SPA can
+        # say "looking up records" the moment routing is decided instead of
+        # showing nothing until the first synthesis token, which on this
+        # hardware is tens of seconds later. See views.py for the SSE event.
+        yield "stage", {"stage": "routing_done", "route": route, "reason": reason}
+
+        sql_result, rag_chunks, effective_route, notes, web_pages = _gather_sources(
+            question, route, profile
+        )
 
         yield "meta", {
             "question": question,
@@ -258,14 +278,28 @@ def _generate_stream(question):
             "rag": _rag_meta(rag_chunks),
             "web": _web_meta(web_pages),
         }
+        yield "stage", {"stage": "sources_ready", "route": effective_route}
 
         pieces = []
+        first_token_seen = False
+        synthesis_started = profile.total_ms
         for piece in synthesize_answer_stream(
             question, effective_route, sql_result=sql_result, rag_chunks=rag_chunks,
             web_pages=web_pages,
         ):
+            if not first_token_seen:
+                first_token_seen = True
+                profile.mark("synthesis_first_token")
             pieces.append(piece)
             yield "token", piece
+        profile.stages.append({
+            "name": "synthesis",
+            "start_ms": synthesis_started,
+            "end_ms": profile.total_ms,
+            "ms": round(profile.total_ms - synthesis_started, 1),
+            "thread": "main",
+            "error": None,
+        })
 
         # VERIFICATION runs only now, because it needs a COMPLETE answer.
         #
@@ -275,10 +309,12 @@ def _generate_stream(question):
         # and destroy streaming entirely. Instead the correction arrives a few
         # seconds after the answer, and only when something was actually wrong.
         streamed_answer = "".join(pieces)
-        _final, trailing, vmeta = verification.verify(
-            question, effective_route, streamed_answer,
-            sql_result=sql_result, rag_chunks=rag_chunks, web_pages=web_pages,
-        )
+        yield "stage", {"stage": "verifying"}
+        with profile.stage("verification"):
+            _final, trailing, vmeta = verification.verify(
+                question, effective_route, streamed_answer,
+                sql_result=sql_result, rag_chunks=rag_chunks, web_pages=web_pages,
+            )
         if trailing:
             pieces.append(trailing)
             yield "token", trailing
@@ -306,7 +342,14 @@ def _generate_stream(question):
             "streamed answer question=%r route=%s degraded=%s verification=%s",
             question, effective_route, bool(notes), vmeta.get("verification"),
         )
-        yield "done", {"answer": final_text, "verification": vmeta}
+        profile.log(question)
+        yield "done", {
+            "answer": final_text,
+            "verification": vmeta,
+            # Per-stage timings ride along on the done event so latency can be
+            # measured from a real client, not only read out of server logs.
+            "profile": profile.as_dict(),
+        }
 
 
 def _sql_meta(sql_result):

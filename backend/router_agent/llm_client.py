@@ -4,9 +4,21 @@ import os
 
 from common import ollama
 
-# LLM_MODEL is the single knob for the model all agents use; ROUTER_MODEL is
-# an optional per-agent override that defaults to it.
-ROUTER_MODEL = os.getenv("ROUTER_MODEL", os.getenv("LLM_MODEL", "qwen2.5:7b"))
+# ROUTER_MODEL defaults to the SMALL model, not LLM_MODEL.
+#
+# This is now a third-tier fallback (see router_agent/fast_router.py) reached
+# only when rules and embeddings are both unconfident, but when it is reached it
+# should still be cheap. Routing is a four-way classification with a worked
+# example for each case in the prompt below; it does not need the 7B.
+#
+# Measured cost of the 7B on this hardware: 5.2-9.1s warm, 60s cold, to emit
+# roughly twenty tokens of JSON.
+ROUTER_MODEL = os.getenv("ROUTER_MODEL", "qwen2.5:3b")
+
+# The output is a single small JSON object. Left uncapped it can ramble a long
+# "reason" string, and every token of it is generated at ~9 tok/s. 80 tokens is
+# comfortably more than {"route": "...", "reason": "<one short sentence>"} needs.
+ROUTER_NUM_PREDICT = int(os.getenv("ROUTER_NUM_PREDICT", "80"))
 
 SYSTEM_PROMPT = """You are a router that decides which backend should handle a user's question about a college information system.
 
@@ -79,6 +91,6 @@ def classify_question(question):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": question},
         ],
-        options={"temperature": 0},
+        options={"temperature": 0, "num_predict": ROUTER_NUM_PREDICT},
         response_format="json",
     )

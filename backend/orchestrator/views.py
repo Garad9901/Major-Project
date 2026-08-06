@@ -115,6 +115,13 @@ def ask(request):
             })
         try:
             for kind, payload in answer_question_stream(question):
+                if kind == "stage":
+                    # Progress ping. Forwarded as its own SSE event so the SPA
+                    # can show what the assistant is doing during the tens of
+                    # seconds before the first answer token exists. Carries no
+                    # answer text and is never appended to answer_parts.
+                    yield _sse("stage", payload)
+                    continue
                 if kind == "meta":
                     meta = payload
                 elif kind == "token":

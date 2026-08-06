@@ -116,13 +116,18 @@ export async function deleteConversation(id) {
 
 /**
  * POST a question to /api/ask/ and stream the SSE response. Callbacks:
- *   onConversation({id,title}), onMeta(meta), onToken(text), onDone(final), onError(msg).
+ *   onConversation({id,title}), onStage({stage,route}), onMeta(meta), onToken(text),
+ *   onDone(final), onError(msg).
+ *
+ * onStage fires as soon as each pipeline step completes, well before the first
+ * answer token exists. On CPU inference that gap is tens of seconds, so it is
+ * the difference between a visibly working assistant and an apparently frozen one.
  *
  * `conversationId` continues an existing thread; omit it to start a new one, in
  * which case onConversation fires with the id the server just created.
  * Returns a promise that resolves when the stream ends.
  */
-export async function askStream(question, { conversationId, onConversation, onMeta, onToken, onDone, onError }) {
+export async function askStream(question, { conversationId, onConversation, onStage, onMeta, onToken, onDone, onError }) {
   const res = await fetch("/api/ask/", {
     method: "POST",
     credentials: "include",
@@ -160,13 +165,13 @@ export async function askStream(question, { conversationId, onConversation, onMe
     while ((sep = buffer.indexOf("\n\n")) !== -1) {
       const frame = buffer.slice(0, sep);
       buffer = buffer.slice(sep + 2);
-      handleFrame(frame, { onConversation, onMeta, onToken, onDone, onError });
+      handleFrame(frame, { onConversation, onStage, onMeta, onToken, onDone, onError });
     }
   }
   return {};
 }
 
-function handleFrame(frame, { onConversation, onMeta, onToken, onDone, onError }) {
+function handleFrame(frame, { onConversation, onStage, onMeta, onToken, onDone, onError }) {
   let event = "message";
   let dataLine = "";
   for (const line of frame.split("\n")) {
@@ -183,6 +188,7 @@ function handleFrame(frame, { onConversation, onMeta, onToken, onDone, onError }
   }
 
   if (event === "conversation") onConversation?.(payload);
+  else if (event === "stage") onStage?.(payload);
   else if (event === "meta") onMeta?.(payload);
   else if (event === "token") onToken?.(payload.text || "");
   else if (event === "done") onDone?.(payload.answer || "");

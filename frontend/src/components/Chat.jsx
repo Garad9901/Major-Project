@@ -168,6 +168,31 @@ function Chat({ username, initialTheme, onLogout, onSessionExpired }) {
         createdId = c.id;
         if (!activeId) setActiveId(c.id);
       },
+      // Fires the moment each pipeline step finishes — the FIRST one arrives
+      // as soon as routing is decided, which is now milliseconds rather than
+      // the ~6s the LLM router used to take. Before this, the skeleton said
+      // "Thinking…" unchanged for the entire tens of seconds before the first
+      // answer token, which is indistinguishable from a hung request.
+      onStage: (s) =>
+        update(() => ({
+          stage:
+            s.stage === "routing_done"
+              ? s.route === "SQL"
+                ? "Querying the database…"
+                : s.route === "RAG"
+                  ? "Searching documents…"
+                  : s.route === "BOTH"
+                    ? "Querying the database and searching documents…"
+                    : s.route === "WEB"
+                      ? "Reading the college page…"
+                      : "Working…"
+              : s.stage === "sources_ready"
+                ? "Writing the answer…"
+                : s.stage === "verifying"
+                  ? "Checking the answer against the records…"
+                  : "Working…",
+          verifying: s.stage === "verifying",
+        })),
       onMeta: (meta) =>
         update(() => ({
           route: meta.route || "",
@@ -184,13 +209,13 @@ function Chat({ username, initialTheme, onLogout, onSessionExpired }) {
                   : "Writing the answer…",
         })),
       onToken: (text) => update((m) => ({ text: m.text + text, pending: false })),
-      onDone: (final) => update((m) => ({ text: final || m.text, pending: false })),
+      onDone: (final) => update((m) => ({ text: final || m.text, pending: false, verifying: false })),
       onError: (msg) => {
         if (msg.toLowerCase().includes("authorized")) expired = true;
-        update((m) => ({ text: m.text || msg, error: true, pending: false }));
+        update((m) => ({ text: m.text || msg, error: true, pending: false, verifying: false }));
       },
     }).catch((err) => {
-      update((m) => ({ text: m.text || err.message, error: true, pending: false }));
+      update((m) => ({ text: m.text || err.message, error: true, pending: false, verifying: false }));
       return {};
     });
 
@@ -288,6 +313,16 @@ function Chat({ username, initialTheme, onLogout, onSessionExpired }) {
                         ) : msg.pending ? (
                           <Skeleton stage={msg.stage || "Thinking…"} />
                         ) : null}
+                        {/* The answer has streamed but the fact-check is still
+                            running. That wait is real — up to a minute on a
+                            retrieval answer — and without this the UI looks
+                            finished while a correction may still arrive. */}
+                        {msg.text && msg.verifying && (
+                          <div className="mt-2 flex items-center gap-2 text-xs text-neutral-400 dark:text-neutral-500">
+                            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-neutral-400 dark:bg-neutral-500" />
+                            Checking this answer against the records…
+                          </div>
+                        )}
                       </div>
                     </div>
                   )

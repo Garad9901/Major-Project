@@ -24,20 +24,52 @@ _TIMEOUT = (_CONNECT_TIMEOUT, _READ_TIMEOUT)
 # is an optional per-agent override that defaults to it.
 VERIFICATION_MODEL = os.getenv("VERIFICATION_MODEL", os.getenv("LLM_MODEL", "qwen2.5:7b"))
 
+# Output caps. Both of these bound GENERATION, which is the expensive half at
+# ~9 tok/s — they do not bound how much the model reads.
+#
+# The verdict is now a short JSON object listing only problems (see
+# VERIFY_SYSTEM_PROMPT), so 400 tokens is generous: it fits several flagged
+# claims with evidence. A correction rewrites an answer, so it needs room for
+# one — capped at roughly the synthesis budget rather than tightly.
+VERIFY_NUM_PREDICT = int(os.getenv("VERIFY_NUM_PREDICT", "400"))
+CORRECT_NUM_PREDICT = int(os.getenv("CORRECT_NUM_PREDICT", "600"))
+
+# REPORT ONLY THE PROBLEMS. THIS IS A LATENCY DECISION AS MUCH AS A PROMPT ONE.
+#
+# This prompt previously asked for one full object per claim — text, supported,
+# confidence, evidence, correct_value — for EVERY claim including the ones that
+# passed. On a retrieval answer that is thirteen objects of roughly sixty tokens
+# each: about 1,500 output tokens, generated at ~9 tok/s on this hardware.
+#
+# Measured: verification cost 168-170s on RAG answers, MORE than the synthesis
+# that produced them, and almost all of it was spent writing out claims that
+# were fine. The common case — nothing wrong — was the most expensive thing the
+# pipeline did.
+#
+# Emitting only UNSUPPORTED claims plus a count makes the common case
+# {"checked": 13, "unsupported": []} — about a dozen tokens instead of 1,500.
+# Nothing needed downstream is lost: the correction step only ever consumed
+# flagged claims, and the metric worth keeping (how many claims were examined
+# versus how many were flagged) is still recorded.
 VERIFY_SYSTEM_PROMPT = """You are a fact-checking verifier for a college information assistant. You are given a final answer that was generated for a user's question, plus the raw source data (SQL query results and/or RAG passages) that answer was supposed to be based on.
 
-Your job: break the answer down into its individual factual claims — specific facts, numbers, names, dates. Skip filler phrases and general statements that don't assert a checkable fact. For EACH claim, check whether it is directly supported by the raw source data provided.
+Your job: mentally break the answer into its individual factual claims — specific facts, numbers, names, dates. Skip filler phrases and general statements that don't assert a checkable fact. Check each one against the raw source data.
 
-For each claim, output:
-- "text": the claim, quoted or closely paraphrased from the answer
-- "supported": true if the raw source data directly confirms this claim, false if the source data contradicts it or contains no information about it at all
-- "confidence": a number from 0.0 to 1.0 — how confident you are in this supported/not-supported judgment
-- "evidence": a short quote or reference to the specific source data that supports or contradicts the claim, or the literal string "no relevant source data found" if there is nothing relevant
-- "correct_value": ONLY set this if supported is false AND the source data actually contains the correct fact (i.e. the answer got a real, checkable fact wrong). If supported is false because the claim was invented from nothing the source data ever mentioned, set this to null.
+Then report ONLY the claims that are NOT supported. Do not list claims that are fine — they are the normal case and listing them wastes time.
 
-Be strict. The source data is the only ground truth — if a claim isn't in it, it isn't supported, no matter how plausible the claim sounds.
+A claim is NOT supported if the source data contradicts it, or if the source data contains no information about it at all.
 
-Respond with ONLY a JSON object of the form: {"claims": [...]}
+Output a JSON object with exactly two keys:
+- "checked": an integer, how many factual claims you examined in total
+- "unsupported": a list — EMPTY if every claim was supported. Each entry has:
+    - "text": the unsupported claim, quoted or closely paraphrased from the answer
+    - "confidence": 0.0 to 1.0, how sure you are that it is unsupported
+    - "evidence": a short note on what the source data says instead, or "no relevant source data found"
+    - "correct_value": the correct fact IF the source data actually contains it; otherwise null
+
+Be strict. The source data is the only ground truth — if a claim isn't in it, it isn't supported, no matter how plausible it sounds.
+
+If everything checks out, respond with exactly: {"checked": <n>, "unsupported": []}
 """
 
 CORRECT_SYSTEM_PROMPT = """You are correcting a previously generated answer for a college information assistant, based on a fact-check that just ran against it.
@@ -72,7 +104,7 @@ Answer to verify:
             ],
             "format": "json",
             "stream": False,
-            "options": {"temperature": 0},
+            "options": {"temperature": 0, "num_predict": VERIFY_NUM_PREDICT},
         },
         timeout=_TIMEOUT,
     )
@@ -106,7 +138,7 @@ Write the corrected answer."""
                 {"role": "user", "content": user_prompt},
             ],
             "stream": False,
-            "options": {"temperature": 0},
+            "options": {"temperature": 0, "num_predict": CORRECT_NUM_PREDICT},
         },
         timeout=_TIMEOUT,
     )

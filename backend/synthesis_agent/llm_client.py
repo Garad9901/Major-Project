@@ -8,6 +8,17 @@ from common import ollama
 # an optional per-agent override that defaults to it.
 SYNTHESIS_MODEL = os.getenv("SYNTHESIS_MODEL", os.getenv("LLM_MODEL", "qwen2.5:7b"))
 
+# The ONLY agent whose job is to write prose, so this is the one cap that is
+# generous rather than tight. It exists to bound a runaway generation, not to
+# shorten answers: 900 tokens is roughly 3,500 characters, comfortably longer
+# than the longest legitimate answer measured (about 1,900).
+#
+# Do NOT tighten this to save time. Truncating mid-sentence is worse for a
+# user than waiting, and the streaming path means they are already reading
+# while it generates. The savings in this pipeline come from the router and
+# verification, which generate short outputs and were uncapped.
+SYNTHESIS_NUM_PREDICT = int(os.getenv("SYNTHESIS_NUM_PREDICT", "900"))
+
 SYSTEM_PROMPT = """You are the final-answer writer for a college information assistant. You are given a user's question plus data gathered by two upstream systems:
 
 - Database rows: exact rows pulled from the college database. Treat this as ground truth — never contradict it, never round or alter its numbers, never omit a fact it contains that the question asked for.
@@ -81,7 +92,7 @@ def synthesize(question, route, sql_section, rag_section):
     content = ollama.chat(
         SYNTHESIS_MODEL,
         messages=_messages(question, route, sql_section, rag_section),
-        options={"temperature": 0.2},
+        options={"temperature": 0.2, "num_predict": SYNTHESIS_NUM_PREDICT},
     )
     return content.strip()
 
@@ -93,5 +104,5 @@ def synthesize_stream(question, route, sql_section, rag_section):
     yield from ollama.chat_stream(
         SYNTHESIS_MODEL,
         messages=_messages(question, route, sql_section, rag_section),
-        options={"temperature": 0.2},
+        options={"temperature": 0.2, "num_predict": SYNTHESIS_NUM_PREDICT},
     )
