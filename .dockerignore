@@ -35,4 +35,8 @@ LICENSE
 
 # frontend tests — dev-only, never shipped (the caddy image builds from repo root)
 frontend/src/__*__.jsx
+# The hook test harness. Nothing imports it from the app, so the bundler
+# already drops it — but it reaches into React's private internals to swap
+# the hook dispatcher, and that has no business inside a production image.
+frontend/src/__testutils__/
 frontend/src/**/*.test.jsx

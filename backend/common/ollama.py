@@ -34,8 +34,22 @@ def chat(model, messages, options=None, response_format=None):
 
 def chat_stream(model, messages, options=None):
     """Streaming chat. Yields content pieces as they arrive. Raises
-    LLMUnavailable on any failure, including the stream dropping mid-answer."""
+    LLMUnavailable on any failure, including the stream dropping mid-answer.
+
+    CLOSING THE RESPONSE IS WHAT MAKES "STOP GENERATING" REAL.
+    When the user stops an answer, Django closes this generator, which raises
+    GeneratorExit at the `yield` below. Without the `finally`, the underlying
+    HTTP connection to Ollama was left for the garbage collector to reclaim
+    whenever it got round to it — and until it did, Ollama carried on generating
+    the whole answer, holding the only inference slot on a machine that can run
+    exactly one at a time. Stopping would have freed the screen and nothing else.
+
+    resp.close() drops the socket, Ollama sees the client disappear and abandons
+    the generation. That is the difference between a Stop button and a Hide
+    button.
+    """
     payload = {"model": model, "messages": messages, "stream": True, "options": options or {}}
+    resp = None
     try:
         resp = requests.post(
             f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=_TIMEOUT, stream=True
@@ -52,6 +66,11 @@ def chat_stream(model, messages, options=None):
                 break
     except requests.RequestException as exc:
         raise LLMUnavailable(f"Ollama streaming chat failed: {exc}") from exc
+    finally:
+        # Runs on normal completion, on error, AND on GeneratorExit when the
+        # caller closes us because the browser went away.
+        if resp is not None:
+            resp.close()
 
 
 def embeddings(model, prompt):

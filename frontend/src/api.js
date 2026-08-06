@@ -115,6 +115,25 @@ export async function deleteConversation(id) {
 }
 
 /**
+ * Keep only the first `keep` messages of a conversation, discarding the rest.
+ *
+ * Called before a regenerate or an edited re-run so the stored thread matches
+ * the one on screen. Best-effort by design: if it fails the user still gets
+ * their new answer, and the only cost is a stale tail in the sidebar copy —
+ * losing the answer instead would be the worse trade.
+ */
+export async function truncateConversation(id, keep) {
+  const res = await fetch(`/api/conversations/${id}/truncate/`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...csrfHeaders() },
+    body: JSON.stringify({ keep }),
+  });
+  if (!res.ok) throw new Error(`Could not truncate (${res.status})`);
+  return res.json();
+}
+
+/**
  * POST a question to /api/ask/ and stream the SSE response. Callbacks:
  *   onConversation({id,title}), onStage({stage,route}), onMeta(meta), onToken(text),
  *   onDone(final), onError(msg).
@@ -127,15 +146,29 @@ export async function deleteConversation(id) {
  * which case onConversation fires with the id the server just created.
  * Returns a promise that resolves when the stream ends.
  */
-export async function askStream(question, { conversationId, onConversation, onStage, onMeta, onToken, onDone, onError }) {
-  const res = await fetch("/api/ask/", {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json", ...csrfHeaders() },
-    body: JSON.stringify(
-      conversationId ? { question, conversation_id: conversationId } : { question }
-    ),
-  });
+export async function askStream(question, { conversationId, onConversation, onStage, onMeta, onToken, onDone, onError, signal, regenerate }) {
+  let res;
+  try {
+    res = await fetch("/api/ask/", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...csrfHeaders() },
+      body: JSON.stringify({
+        question,
+        ...(conversationId ? { conversation_id: conversationId } : {}),
+        // Regenerate must not be served the answer the user just rejected.
+        ...(regenerate ? { regenerate: true } : {}),
+      }),
+      // Aborting this fetch drops the TCP connection. Django then closes the
+      // response generator, which releases the LLM slot and — via the
+      // finally in common/ollama.chat_stream — closes the socket to Ollama
+      // so it stops generating. See the Stop button in Chat.jsx.
+      signal,
+    });
+  } catch (err) {
+    if (err?.name === "AbortError") return { aborted: true };
+    throw err;
+  }
 
   if (res.status === 401 || res.status === 403) {
     onError?.("Your session is not authorized. Please log in again.");
@@ -156,17 +189,26 @@ export async function askStream(question, { conversationId, onConversation, onSt
   let buffer = "";
 
   // SSE frames are separated by a blank line; parse them as they complete.
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
 
-    let sep;
-    while ((sep = buffer.indexOf("\n\n")) !== -1) {
-      const frame = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
-      handleFrame(frame, { onConversation, onStage, onMeta, onToken, onDone, onError });
+      let sep;
+      while ((sep = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        handleFrame(frame, { onConversation, onStage, onMeta, onToken, onDone, onError });
+      }
     }
+  } catch (err) {
+    // Once the body is already streaming, an abort surfaces HERE rather than at
+    // the fetch above. It is a deliberate user action, not a failure, so it must
+    // not reach onError — which would paint the partial answer red as though
+    // something had gone wrong.
+    if (err?.name === "AbortError") return { aborted: true };
+    throw err;
   }
   return {};
 }

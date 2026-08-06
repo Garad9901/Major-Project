@@ -3,3 +3,82 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   Syntax highlighting (rehype-highlight emits highlight.js `hljs-*` classes).
+
+   Written by hand rather than importing one of highlight.js's stock themes for
+   two reasons: every stock theme is single-mode, so a dark one is unreadable in
+   light mode and vice versa, and they all set their own background, which
+   fights the code-block chrome in Markdown.jsx. Colours below are inherited
+   from the surrounding block and defined for both schemes.
+
+   Palette chosen for contrast against the block backgrounds actually used
+   (neutral-50 light / neutral-900 dark), not picked for looks.
+   --------------------------------------------------------------------------- */
+.hljs { color: inherit; background: transparent; }
+
+.hljs-comment,
+.hljs-quote           { color: #6b7280; font-style: italic; }
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-doctag,
+.hljs-name,
+.hljs-strong          { color: #7c3aed; font-weight: 600; }
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-meta .hljs-string { color: #047857; }
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link,
+.hljs-selector-attr,
+.hljs-selector-pseudo { color: #b45309; }
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.function_,
+.hljs-built_in,
+.hljs-class .hljs-title { color: #1d4ed8; }
+.hljs-variable,
+.hljs-template-variable,
+.hljs-type,
+.hljs-selector-class,
+.hljs-selector-id     { color: #be123c; }
+.hljs-deletion        { color: #b91c1c; }
+.hljs-emphasis        { font-style: italic; }
+
+.dark .hljs-comment,
+.dark .hljs-quote     { color: #9ca3af; }
+.dark .hljs-keyword,
+.dark .hljs-selector-tag,
+.dark .hljs-literal,
+.dark .hljs-section,
+.dark .hljs-doctag,
+.dark .hljs-name,
+.dark .hljs-strong    { color: #c4b5fd; }
+.dark .hljs-string,
+.dark .hljs-regexp,
+.dark .hljs-addition,
+.dark .hljs-attribute,
+.dark .hljs-meta .hljs-string { color: #6ee7b7; }
+.dark .hljs-number,
+.dark .hljs-symbol,
+.dark .hljs-bullet,
+.dark .hljs-link,
+.dark .hljs-selector-attr,
+.dark .hljs-selector-pseudo   { color: #fcd34d; }
+.dark .hljs-title,
+.dark .hljs-title.class_,
+.dark .hljs-title.function_,
+.dark .hljs-built_in,
+.dark .hljs-class .hljs-title { color: #93c5fd; }
+.dark .hljs-variable,
+.dark .hljs-template-variable,
+.dark .hljs-type,
+.dark .hljs-selector-class,
+.dark .hljs-selector-id       { color: #fda4af; }
+.dark .hljs-deletion          { color: #fca5a5; }

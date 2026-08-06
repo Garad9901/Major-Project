@@ -184,7 +184,7 @@ def answer_question(question):
     }
 
 
-def answer_question_stream(question):
+def answer_question_stream(question, bypass_cache=False):
     """Full pipeline, streaming. Yields ('meta', {...}), then ('token', str)
     per piece, then ('done', {...}). Degradation notes (if any) are streamed
     as trailing tokens so the user sees why the answer is limited. Raises
@@ -198,6 +198,24 @@ def answer_question_stream(question):
     releases it when this generator is closed, including when Django closes it
     because the client disconnected mid-answer.
     """
+    # REGENERATE MUST NOT BE ANSWERED FROM THE CACHE.
+    #
+    # Found while testing Prompt 27: an intermittently wrong answer ("There are
+    # 0 faculty members in the Medicine department" — the model had queried the
+    # 7-row staff directory instead of the 13,000-row survey) was stored by the
+    # semantic cache and then replayed to every subsequent user, identical every
+    # time, for the rest of the process lifetime. Verification could not catch
+    # it: the answer faithfully reported what its own (wrong) query returned.
+    #
+    # Regenerate is the one control a user has when an answer looks wrong. If it
+    # returned the same cached text it would be useless exactly when it matters,
+    # so it skips the lookup — and the fresh answer is still STORED, which
+    # overwrites the bad entry and repairs it for everyone else.
+    if bypass_cache:
+        logger.info("cache bypassed (regenerate) for %r", question[:60])
+        yield from _generate_stream(question)
+        return
+
     # CACHE CHECK BEFORE THE SLOT, DELIBERATELY.
     #
     # Doing it inside llm_slot() would make every cached answer queue behind

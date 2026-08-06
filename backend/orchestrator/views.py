@@ -79,6 +79,10 @@ def ask(request):
     username = getattr(request.user, "username", "") or "anonymous"
     client_ip = _client_ip(request)
     raw_question = request.data.get("question")
+    # Set by the SPA's Regenerate button. Skips the response cache so the
+    # user gets a genuinely new answer rather than the one they just
+    # rejected — see orchestrator/service.answer_question_stream.
+    bypass_cache = bool(request.data.get("regenerate"))
 
     try:
         question, injection_flags = sanitize_question(raw_question)
@@ -114,7 +118,7 @@ def ask(request):
                 "title": conversation.title,
             })
         try:
-            for kind, payload in answer_question_stream(question):
+            for kind, payload in answer_question_stream(question, bypass_cache=bypass_cache):
                 if kind == "stage":
                     # Progress ping. Forwarded as its own SSE event so the SPA
                     # can show what the assistant is doing during the tens of
@@ -253,6 +257,54 @@ def conversation_detail(request, pk):
             for m in convo.messages.all()
         ],
     })
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def conversation_truncate(request, pk):
+    """Drop every message after the first `keep`, for edit and regenerate.
+
+    WHY THIS ENDPOINT EXISTS
+    "Regenerate" and "Edit message" re-run the pipeline from a point in the
+    thread. Without this, the SPA would show the rewritten thread while the
+    server quietly kept appending — so reopening the conversation from the
+    sidebar would show the abandoned attempts interleaved with the kept ones,
+    and the stored history would not match what the user was looking at when
+    they had the conversation.
+
+    Takes a COUNT rather than a message id on purpose: a conversation created
+    moments ago in this same session has no message ids on the client yet (they
+    are assigned server-side as the stream runs), but the client always knows
+    how many messages it is keeping. Message ordering is deterministic —
+    ("created_at", "id"), see models.Meta — so a count identifies the same
+    prefix on both sides.
+
+    Scoped to request.user, so another account's conversation is a 404 rather
+    than a permission error, matching conversation_detail.
+    """
+    convo = Conversation.objects.filter(pk=pk, user=request.user).first()
+    if convo is None:
+        return Response({"error": "Not found."}, status=404)
+
+    try:
+        keep = int(request.data.get("keep"))
+    except (TypeError, ValueError):
+        return Response({"error": "keep must be an integer."}, status=400)
+    if keep < 0:
+        return Response({"error": "keep must not be negative."}, status=400)
+
+    ids = list(convo.messages.values_list("id", flat=True))
+    doomed = ids[keep:]
+    if doomed:
+        Message.objects.filter(conversation=convo, id__in=doomed).delete()
+        logger.info(
+            "truncated conversation %s for %r: kept %d, deleted %d",
+            convo.pk, request.user.username, keep, len(doomed),
+        )
+    # The audit log is deliberately untouched. A user rewriting their own chat
+    # history does not rewrite the compliance record of what was asked — same
+    # separation as deleting a conversation. See orchestrator/models.py.
+    return Response({"kept": min(keep, len(ids)), "deleted": len(doomed)})
 
 
 def _write_audit(*, username, client_ip, question, meta, answer, injection_flags, latency_ms):

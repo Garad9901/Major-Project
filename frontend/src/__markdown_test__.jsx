@@ -131,7 +131,12 @@ check("nested <ul> inside an <li>", /<li[^>]*>[\s\S]*?<ul[^>]*>[\s\S]*?<li[^>]*>
 check("nested <ol> inside an <li>", /<li[^>]*>[\s\S]*?<ol[^>]*>[\s\S]*?<li[^>]*>/.test(nested));
 check("three-deep nesting survives", /Of whom/.test(nested) && (nested.match(/<ul/g) || []).length >= 3);
 check("table still renders alongside lists", /<table[^>]*>[\s\S]*?<th[^>]*>Rank<\/th>/.test(nested));
-check("code block still renders alongside lists", /<pre[^>]*>[\s\S]*?<code[^>]*>[\s\S]*?def total/.test(nested));
+// Structural only. Since syntax highlighting was added, the code body is no
+// longer contiguous text inside <code> — `def` becomes
+// <span class="hljs-keyword">def</span> — so asserting on "def total" here
+// tested the absence of highlighting rather than the presence of a code block.
+// The body itself is still checked below, against the tag-stripped text.
+check("code block still renders alongside lists", /<pre[^>]*>[\s\S]*?<code[^>]*>/.test(nested));
 check("inline code inside a nested item", /<code[^>]*>Expert<\/code>/.test(nested));
 check("blockquote renders as <blockquote>", /<blockquote[^>]*>/.test(nested));
 
@@ -148,6 +153,45 @@ console.log("\n--- nested response keeps its content ---");
 check("keeps deepest item text", nestedVisible.includes("Of whom"));
 check("keeps table cell", nestedVisible.includes("3053"));
 check("keeps code body", nestedVisible.includes("def total"));
+
+// ---------------------------------------------------------------------------
+// SYNTAX HIGHLIGHTING (Prompt 27, item 8)
+// ---------------------------------------------------------------------------
+console.log("\n--- syntax highlighting by language ---");
+
+const PY = renderToStaticMarkup(
+  <Markdown>{"```python\ndef total(rows):\n    return sum(r for r in rows)\n```"}</Markdown>
+);
+check("python keywords are tokenised", /class="hljs-keyword"[^>]*>def</.test(PY));
+check("language label is shown in the header", />python</i.test(PY));
+check("a copy button is rendered for the block", /Copy code/i.test(PY));
+
+const SQL = renderToStaticMarkup(
+  <Markdown>{"```sql\nSELECT COUNT(*) FROM faculty_development WHERE age > 40;\n```"}</Markdown>
+);
+check("sql keywords are tokenised", /hljs-keyword/.test(SQL));
+check("sql body survives highlighting", />SELECT</.test(SQL.replace(/<span[^>]*>/g, ">")));
+
+// detect:false means an undeclared block must stay plain rather than being
+// guessed at — a mis-highlighted block reads worse than an unhighlighted one.
+const PLAIN = renderToStaticMarkup(<Markdown>{"```\njust some text\n```"}</Markdown>);
+check("undeclared block is NOT auto-highlighted", !/hljs-keyword/.test(PLAIN));
+check("undeclared block still renders as a code block", /<pre[^>]*>[\s\S]*?<code/.test(PLAIN));
+
+// An unknown language must not throw (ignoreMissing) and must still render.
+const WEIRD = renderToStaticMarkup(
+  <Markdown>{"```notalanguage\nhello world\n```"}</Markdown>
+);
+check("unknown language degrades to a plain block", /<pre[^>]*>[\s\S]*?hello world/.test(
+  WEIRD.replace(/<span[^>]*>/g, "").replace(/<\/span>/g, "")
+));
+
+// Highlighting must not have introduced an HTML injection path: the source is
+// escaped before tokenising, so a <script> inside a fence stays inert.
+const EVIL_CODE = renderToStaticMarkup(
+  <Markdown>{"```javascript\nconst x = \"<script>alert(1)</script>\";\n```"}</Markdown>
+);
+check("script inside a highlighted fence is escaped", !/<script/i.test(EVIL_CODE));
 
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);
 if (fail > 0) process.exitCode = 1;

@@ -267,6 +267,22 @@ docker compose exec -T frontend sh -c \
 
 Exit code is non-zero if any assertion fails.
 
+### Frontend streaming buffer (14 assertions)
+
+`frontend/src/__smoothtext_test__.jsx` drives the character-drip buffer that
+smooths streamed text (`hooks/useSmoothText.js`) with a manually stepped
+animation clock, so "how many frames did this take" is assertable rather than
+timing-dependent. The property that matters: **every intermediate value is a
+prefix of the text actually received** — it can never display a character the
+server did not send.
+
+```bash
+docker compose exec -T frontend sh -c \
+  "cd /app && npx --yes esbuild src/__smoothtext_test__.jsx --bundle \
+     --platform=node --format=cjs --outfile=/tmp/smoothtest.cjs \
+     --loader:.jsx=jsx --jsx=automatic --log-level=error && node /tmp/smoothtest.cjs"
+```
+
 > The file lives in `src/` but is never shipped: nothing imports it, so the
 > bundler drops it, and `.dockerignore` excludes `frontend/src/__*__.jsx` from
 > the production build context. Both were verified.

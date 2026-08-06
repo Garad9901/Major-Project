@@ -2,7 +2,7 @@
 
 from django.urls import include, path
 
-from orchestrator.views import conversation_detail, conversations
+from orchestrator.views import conversation_detail, conversation_truncate, conversations
 
 urlpatterns = [
     path("api/health/", include("health.urls")),
@@ -13,4 +13,8 @@ urlpatterns = [
     # path "api/ask/" and cannot also serve a sibling route.
     path("api/conversations/", conversations, name="conversations"),
     path("api/conversations/<int:pk>/", conversation_detail, name="conversation-detail"),
+    # Used by "Regenerate" and "Edit message" to drop the abandoned tail of a
+    # thread, so stored history matches what the user actually kept.
+    path("api/conversations/<int:pk>/truncate/", conversation_truncate,
+         name="conversation-truncate"),
 ]
