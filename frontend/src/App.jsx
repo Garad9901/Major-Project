@@ -26,9 +26,28 @@ function App() {
 
   // Paint the saved theme as soon as we know who the user is, so the login and
   // change-password screens are already in the right mode rather than flashing
-  // the wrong one. Signed-out screens fall back to dark.
+  // the wrong one.
+  //
+  // SIGNED OUT, the profile does not exist yet, so the sign-in screen's own
+  // preference is honoured instead (Login.jsx keeps it in localStorage — the
+  // only store available before there is an account). This used to force dark
+  // for every signed-out visitor, which meant choosing light on the sign-in
+  // screen was undone on the next page load.
+  //
+  // SIGNED IN, the profile wins unconditionally. That ordering is the point:
+  // the account's preference follows the person between machines, and the local
+  // value is only ever a first-paint fallback.
   useEffect(() => {
-    const dark = !user || user.theme !== "light";
+    let dark;
+    if (user) {
+      dark = user.theme !== "light";
+    } else {
+      let saved = null;
+      try {
+        saved = localStorage.getItem("theme");
+      } catch { /* private browsing can throw */ }
+      dark = saved ? saved === "dark" : true;
+    }
     document.documentElement.classList.toggle("dark", dark);
   }, [user]);
 

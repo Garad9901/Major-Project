@@ -30,7 +30,16 @@ export async function login(username, password) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || `Login failed (${res.status})`);
+    // The STATUS is carried on the error, not just the message.
+    //
+    // The three failure modes are genuinely different situations for the user
+    // and deserve different wording: 401 is "check what you typed", 423 is
+    // "the account is locked, here is when it clears", 429 is "you are going
+    // too fast". Matching on the message string to tell them apart would break
+    // the moment the backend rewords anything, so the code travels with it.
+    const err = new Error(data.error || data.detail || `Login failed (${res.status})`);
+    err.status = res.status;
+    throw err;
   }
   return data; // { username, role, is_staff, must_change_password }
 }

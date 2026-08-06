@@ -1,5 +1,14 @@
 /* Copyright (c) 2026 Yash Garad. All rights reserved. */
 
+/* The display face for the institute wordmark and headings.
+   SELF-HOSTED, and it has to be: the production CSP sets `font-src 'self'`,
+   so a Google Fonts <link> would be blocked and the page would quietly fall
+   back to Georgia. Importing the package makes Vite emit the woff2 into
+   /assets and rewrite the @font-face src to our own origin.
+   Variable weight axis only — the italic and optical-size files are not
+   imported, because nothing here uses them. */
+@import "@fontsource-variable/fraunces/wght.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

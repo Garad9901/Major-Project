@@ -267,6 +267,19 @@ docker compose exec -T frontend sh -c \
 
 Exit code is non-zero if any assertion fails.
 
+### Sign-in screen (40 assertions)
+
+`frontend/src/__login_test__.jsx` renders the sign-in screen to static HTML and
+checks the institute identity appears, the four failure modes produce distinct
+and calm wording, and the generated lattice is deterministic. It also asserts
+the ABSENCE of the visual clichés the design brief ruled out — no purple/indigo,
+no floating card shadow, no decorative gradient, no rocket/spark iconography —
+because those are what creep back in during a later edit.
+
+```bash
+docker compose exec -T frontend sh -c   "cd /app && npx --yes esbuild src/__login_test__.jsx --bundle      --platform=node --format=cjs --outfile=/tmp/logintest.cjs      --loader:.jsx=jsx --loader:.css=empty --jsx=automatic --log-level=error    && node /tmp/logintest.cjs"
+```
+
 ### Frontend streaming buffer (14 assertions)
 
 `frontend/src/__smoothtext_test__.jsx` drives the character-drip buffer that
