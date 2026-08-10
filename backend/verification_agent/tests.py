@@ -13,7 +13,7 @@ said an answer was fine without checking it". Every test below that expects
 from django.test import SimpleTestCase
 
 from verification_agent import fast_check
-from verification_agent.service import _parse_claims
+from verification_agent.service import VerdictUnreadable, _parse_claims
 
 
 class _SqlResult:
@@ -157,14 +157,66 @@ class TerseVerdictParsingTests(SimpleTestCase):
         self.assertEqual(len(claims), 2)
         self.assertEqual([c["supported"] for c in claims], [True, False])
 
-    def test_unparseable_output_reports_nothing_checked(self):
-        """Must NOT look like a clean pass — checked=0 is the signal that
-        verification did not actually happen."""
-        claims, checked = _parse_claims("not json at all")
-        self.assertEqual(claims, [])
-        self.assertEqual(checked, 0)
+    def test_unparseable_output_raises_rather_than_looking_clean(self):
+        """The defect this guards against was live in production.
+
+        A verdict truncated mid-string by the output cap used to return an empty
+        claim list, which is indistinguishable from "checked, nothing wrong" —
+        so the answer was logged `verification=ran, flagged=0` and shown to the
+        user as though it had passed a check that never completed.
+        """
+        with self.assertRaises(VerdictUnreadable):
+            _parse_claims("not json at all")
+
+    def test_truncated_json_raises(self):
+        """The exact shape seen in the logs: valid JSON that stops mid-string."""
+        truncated = (
+            '{"checked": 5, "unsupported": [{"text": "a claim", "confidence": 1.0, '
+            '"evidence": "the source passage begins here and then just st'
+        )
+        with self.assertRaises(VerdictUnreadable):
+            _parse_claims(truncated)
+
+    def test_non_object_json_raises(self):
+        for raw in ["[1, 2, 3]", '"a string"', "42"]:
+            with self.subTest(raw=raw):
+                with self.assertRaises(VerdictUnreadable):
+                    _parse_claims(raw)
 
     def test_code_fenced_json_parses(self):
         claims, checked = _parse_claims('```json\n{"checked": 3, "unsupported": []}\n```')
         self.assertEqual(checked, 3)
         self.assertEqual(claims, [])
+
+
+class CorrectionOnlyWhenCorrectableTests(SimpleTestCase):
+    """A claim flagged with correct_value=null means "could not confirm", not
+    "this is wrong". Rewriting on that basis let a 3B model replace a correct
+    figure with the literal placeholder "[The actual number of faculty in
+    Management]" — measured, not hypothetical.
+    """
+
+    def test_flagged_without_a_correct_value_is_not_correctable(self):
+        claims, _checked = _parse_claims(
+            '{"checked": 2, "unsupported": [{"text": "mean age is 58.71", '
+            '"confidence": 0.8, "evidence": "not in source", "correct_value": null}]}'
+        )
+        correctable = [c for c in claims if c.get("correct_value")]
+        self.assertEqual(correctable, [], "would have triggered a pointless rewrite")
+
+    def test_flagged_with_a_correct_value_is_correctable(self):
+        claims, _checked = _parse_claims(
+            '{"checked": 2, "unsupported": [{"text": "there are 9999 faculty", '
+            '"confidence": 0.9, "evidence": "source says 3053", "correct_value": "3053"}]}'
+        )
+        correctable = [c for c in claims if c.get("correct_value")]
+        self.assertEqual(len(correctable), 1)
+        self.assertEqual(correctable[0]["correct_value"], "3053")
+
+    def test_empty_string_correct_value_is_not_correctable(self):
+        """An empty string is the model declining, not a value."""
+        claims, _checked = _parse_claims(
+            '{"checked": 1, "unsupported": [{"text": "x", "confidence": 0.5, '
+            '"evidence": "e", "correct_value": ""}]}'
+        )
+        self.assertEqual([c for c in claims if c.get("correct_value")], [])

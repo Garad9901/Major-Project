@@ -1,0 +1,190 @@
+\documentclass[11pt,a4paper]{article}
+
+% ---------------------------------------------------------------
+% College Assistant -- Copyright Notice / Proprietary Software Notice
+% For inclusion with software delivery
+% ---------------------------------------------------------------
+
+\usepackage[margin=1in]{geometry}
+\usepackage{fontspec}
+\setmainfont{Latin Modern Roman}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    urlcolor=blue,
+    pdftitle={College Assistant -- Copyright Notice},
+    pdfauthor={Yash Garad},
+    pdfsubject={Proprietary Software Copyright Notice}
+}
+
+\titleformat{\section}{\large\bfseries}{\thesection.}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.6em}{}
+\titlespacing*{\section}{0pt}{1.4em}{0.6em}
+
+\setlength{\headheight}{14pt}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{College Assistant -- Copyright Notice}
+\fancyhead[R]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyfoot[C]{\small Copyright \copyright\ 2026 Yash Garad. All rights reserved.}
+
+\setlist[enumerate,1]{label=(\alph*)}
+
+\newcommand{\OwnerName}{Yash Garad}
+\newcommand{\OwnerEmail}{agamemnon1527@gmail.com}
+\newcommand{\SoftwareName}{College Assistant}
+\newcommand{\SoftwareTagline}{A Multi-Agent Retrieval-Augmented Question Answering System}
+\newcommand{\CopyrightYear}{2026}
+
+\begin{document}
+
+% ------------------------- Title block -------------------------
+\begin{center}
+    {\LARGE \bfseries PROPRIETARY SOFTWARE LICENSE}\\[0.3em]
+    {\large All Rights Reserved}\\[1.2em]
+    {\Large \SoftwareName}\\[0.2em]
+    {\normalsize \itshape \SoftwareTagline}\\[0.8em]
+    Copyright \copyright\ \CopyrightYear\ \OwnerName. All rights reserved.
+\end{center}
+
+\vspace{1em}
+\noindent\rule{\linewidth}{0.6pt}
+\vspace{0.5em}
+
+% ------------------------- 1. Ownership -------------------------
+\section{Ownership}
+
+This software, including all source code, object code, configuration files,
+database schemas, prompt designs, documentation, and any accompanying
+materials (collectively, the ``Software''), is the exclusive property of
+\OwnerName\ (the ``Owner'') and is protected by the Copyright Act, 1957
+(India), as amended, and by applicable international copyright treaties and
+conventions.
+
+The Software is licensed, not sold. No transfer of ownership, title, or
+intellectual property rights of any kind is made or implied by the
+possession, receipt, or use of a copy of the Software.
+
+% ------------------------- 2. No License Granted -------------------------
+\section{No License Granted}
+
+No rights or licenses are granted under this document, whether by
+implication, estoppel, or otherwise, except as expressly stated in a
+separate written agreement signed by the Owner.
+
+Without the prior express written permission of the Owner, no person or
+entity may:
+
+\begin{enumerate}
+    \item copy, reproduce, or duplicate the Software, in whole or in part;
+    \item modify, adapt, translate, or create derivative works from the
+          Software;
+    \item distribute, publish, sublicense, sell, rent, lease, lend, or
+          otherwise transfer the Software or any copy thereof to any third
+          party;
+    \item host, deploy, or make the Software available as a service to any
+          third party, whether or not for a fee;
+    \item reverse engineer, decompile, or disassemble the Software, except
+          to the limited extent such restriction is expressly prohibited by
+          applicable law;
+    \item remove, obscure, or alter any copyright notice, proprietary
+          legend, or attribution contained in or on the Software; or
+    \item use the Software for any commercial purpose.
+\end{enumerate}
+
+% ------------------------- 3. Authorized Use -------------------------
+\section{Authorized Use}
+
+Any permitted use of the Software is governed solely by the terms of a
+separate written licence agreement executed by the Owner. In the absence of
+such an agreement, no use is authorized.
+
+% ------------------------- 4. Third-Party Components -------------------------
+\section{Third-Party Components}
+
+The Software is designed to operate together with third-party software
+components that are \textbf{not} owned by the Owner and are \textbf{not}
+covered by this licence. Each such component remains subject to its own
+licence terms, and nothing in this document modifies, supersedes, or
+restricts those terms.
+
+These components are obtained at build time via the declared dependency
+manifests and are not distributed as part of the Software. They include,
+without limitation:
+
+\begin{description}[leftmargin=2em, style=nextline]
+    \item[Backend \textit{(see backend/requirements.txt)}]
+    Django, Django REST Framework, django-cors-headers, psycopg2-binary,
+    python-dotenv, gunicorn, sqlglot, qdrant-client, requests
+
+    \item[Frontend \textit{(see frontend/package.json)}]
+    React, React DOM, Vite, \texttt{@vitejs/plugin-react}, Tailwind CSS,
+    PostCSS, Autoprefixer
+
+    \item[Container images \textit{(see docker-compose.yml)}]
+    PostgreSQL, Qdrant, Ollama, Caddy, and the language models served by
+    Ollama
+\end{description}
+
+The Owner's claim of copyright extends only to the original work of
+authorship in the Software -- the application source code, architecture,
+agent designs, prompt engineering, security controls, and documentation
+authored by the Owner -- and does not extend to any third-party component
+listed above.
+
+% ------------------------- 5. Disclaimer of Warranty -------------------------
+\section{Disclaimer of Warranty}
+
+THE SOFTWARE IS PROVIDED ``AS IS'', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, ACCURACY, AND NON-INFRINGEMENT.
+
+The Software incorporates automated language-model-generated output. Such
+output may be incomplete, inaccurate, or otherwise unsuitable for any
+particular purpose, and must not be relied upon as authoritative without
+independent verification.
+
+% ------------------------- 6. Limitation of Liability -------------------------
+\section{Limitation of Liability}
+
+IN NO EVENT SHALL THE OWNER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
+FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+% ------------------------- 7. Governing Law -------------------------
+\section{Governing Law}
+
+This licence shall be governed by and construed in accordance with the laws
+of India, without regard to its conflict-of-law provisions. The courts of
+India shall have exclusive jurisdiction over any dispute arising out of or
+in connection with this licence.
+
+% ------------------------- 8. Contact -------------------------
+\section{Contact}
+
+For licensing enquiries, permissions, or any other matter relating to this
+Software, contact the Owner:
+
+\begin{center}
+\begin{tabular}{ll}
+    Name:  & \OwnerName \\
+    Email: & \href{mailto:\OwnerEmail}{\OwnerEmail} \\
+\end{tabular}
+\end{center}
+
+\vspace{2em}
+\noindent\rule{\linewidth}{0.6pt}
+
+\begin{center}
+    \small \itshape END OF TERMS
+\end{center}
+
+\end{document}

@@ -13,6 +13,14 @@ logger = logging.getLogger("verification_agent")
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
 
 
+class VerdictUnreadable(Exception):
+    """The verifier's output could not be parsed, so no check actually happened.
+
+    Deliberately an exception rather than a sentinel value: it has to be
+    impossible to mistake for "checked, nothing wrong". See _parse_claims.
+    """
+
+
 class VerificationResult:
     def __init__(self, question, original_answer, final_answer, claims, was_corrected):
         self.question = question
@@ -98,17 +106,32 @@ def _parse_claims(raw_output):
 
     Returns (claims, checked_count). `claims` holds only the flagged ones under
     the new shape; `checked_count` is how many the model says it examined.
+
+    RAISES VerdictUnreadable when the output cannot be parsed, rather than
+    returning an empty list.
+
+    That distinction is the whole point. An empty list means "checked, nothing
+    wrong" — a pass. Unparseable output means the check did not happen. Returning
+    [] for both was a real defect: observed in production logs, a verdict
+    truncated mid-string by the output cap was logged as
+    `checked=0 flagged=0 verification=ran`, so an answer nobody had successfully
+    fact-checked was presented exactly like one that had passed. Raising routes
+    it to the honest path in orchestrator/verification.verify(), which marks the
+    answer unverified and tells the user so.
     """
     text = _CODE_FENCE_RE.sub("", raw_output).strip()
     try:
         parsed = json.loads(text)
     except (json.JSONDecodeError, AttributeError) as exc:
-        logger.warning("failed to parse verification output raw=%r error=%s", raw_output, exc)
-        return [], 0
+        logger.warning(
+            "verification verdict did not parse (%s) — treating as NOT VERIFIED. raw[:300]=%r",
+            exc, raw_output[:300],
+        )
+        raise VerdictUnreadable(str(exc)) from None
 
     if not isinstance(parsed, dict):
-        logger.warning("verification output was not an object: %r", raw_output[:200])
-        return [], 0
+        logger.warning("verification verdict was not an object: %r", raw_output[:200])
+        raise VerdictUnreadable("verdict was not a JSON object")
 
     if "unsupported" in parsed:
         raw_claims = parsed.get("unsupported") or []
@@ -193,8 +216,30 @@ def verify_and_correct(question, route, answer, sql_result=None, rag_chunks=None
 
     flagged_claims = [c for c in claims if not c["supported"]]
 
-    if flagged_claims:
-        final_answer = llm_client.correct_answer(question, answer, flagged_claims)
+    # ONLY REWRITE WHEN THE VERIFIER ACTUALLY KNOWS THE RIGHT VALUE.
+    #
+    # Previously any flagged claim triggered a full rewrite, including claims
+    # flagged with correct_value=null — i.e. "I could not confirm this", not "I
+    # know this is wrong". Asking a 3B model to rewrite a correct answer on that
+    # basis made answers worse, measurably:
+    #
+    #   Q: Which has more faculty, Computer Science or Management?
+    #   synthesis: "Computer Science has more faculty with 1,916 compared to
+    #               Management's 1,784."            <- both figures correct
+    #   rewrite:   "...compared to Management's [The actual number of faculty
+    #               in Management]."                <- a template placeholder
+    #
+    # It also dominated answer length: across a 20-question run, 12 answers were
+    # rewritten and the median answer went from 112 characters of actual content
+    # to 320 with the appendix bolted on.
+    #
+    # When there is no correct_value there is nothing to correct TO, so the
+    # answer is left alone and the caller appends the short "could not be
+    # confirmed" note instead. That keeps the honest signal and drops the
+    # fabrication.
+    correctable = [c for c in flagged_claims if c.get("correct_value")]
+    if correctable:
+        final_answer = llm_client.correct_answer(question, answer, correctable)
     else:
         final_answer = answer
 

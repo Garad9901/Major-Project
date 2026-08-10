@@ -31,7 +31,16 @@ VERIFICATION_MODEL = os.getenv("VERIFICATION_MODEL", os.getenv("LLM_MODEL", "qwe
 # VERIFY_SYSTEM_PROMPT), so 400 tokens is generous: it fits several flagged
 # claims with evidence. A correction rewrites an answer, so it needs room for
 # one — capped at roughly the synthesis budget rather than tightly.
-VERIFY_NUM_PREDICT = int(os.getenv("VERIFY_NUM_PREDICT", "400"))
+# Raised from 400 after observing truncation in production logs.
+#
+# At 400 the model ran out of budget mid-string on retrieval answers — it was
+# pasting whole retrieved passages into the "evidence" field, so three flagged
+# claims exhausted it. The JSON then failed to parse, and (before the fix in
+# service._parse_claims) a failed parse read downstream as "nothing flagged",
+# i.e. a clean pass. A truncated safety check that looks like a passing one is
+# the worst possible outcome, so this is now generous AND the evidence field is
+# explicitly capped in the prompt.
+VERIFY_NUM_PREDICT = int(os.getenv("VERIFY_NUM_PREDICT", "900"))
 CORRECT_NUM_PREDICT = int(os.getenv("CORRECT_NUM_PREDICT", "600"))
 
 # REPORT ONLY THE PROBLEMS. THIS IS A LATENCY DECISION AS MUCH AS A PROMPT ONE.
@@ -64,7 +73,7 @@ Output a JSON object with exactly two keys:
 - "unsupported": a list — EMPTY if every claim was supported. Each entry has:
     - "text": the unsupported claim, quoted or closely paraphrased from the answer
     - "confidence": 0.0 to 1.0, how sure you are that it is unsupported
-    - "evidence": a short note on what the source data says instead, or "no relevant source data found"
+    - "evidence": AT MOST 15 WORDS on what the source says instead, or "not in source". Do NOT quote or paste the passage — a long quote here truncates the response and the whole check is lost.
     - "correct_value": the correct fact IF the source data actually contains it; otherwise null
 
 Be strict. The source data is the only ground truth — if a claim isn't in it, it isn't supported, no matter how plausible it sounds.

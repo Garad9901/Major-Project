@@ -154,8 +154,27 @@ def verify(question, route, answer, sql_result=None, rag_chunks=None, web_pages=
     if not flagged:
         return result.final_answer, "", meta
 
-    if result.was_corrected and result.final_answer != answer:
-        # Something was wrong AND the checker produced a better answer. Show it.
+    # A "correction" that still contains the original answer verbatim has not
+    # corrected anything — it has restated it and bolted on a hedge. Observed:
+    #
+    #   answer:     "Computer Science has more faculty with 1,916 compared to
+    #                Management's 1,784."
+    #   correction: "Computer Science has more faculty with 1,916 compared to
+    #                Management's 1,784. The actual number of faculty in
+    #                Management could not be verified against the database."
+    #
+    # Appending that doubles the length, repeats the figures, and ends by
+    # contradicting the number it just printed. The short note says the same
+    # thing without the noise.
+    rewrote_something = (
+        result.was_corrected
+        and result.final_answer != answer
+        and answer.strip() not in result.final_answer
+    )
+
+    if rewrote_something:
+        # Something was wrong AND the checker produced a genuinely different
+        # answer. Show it.
         trailing = CORRECTION_HEADER + result.final_answer.strip()
     else:
         # Something was flagged but could not be corrected from the source data.
