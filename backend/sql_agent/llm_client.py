@@ -43,4 +43,5 @@ def generate_sql(question, schema_text):
             {"role": "user", "content": question},
         ],
         options={"temperature": 0, "num_predict": SQL_NUM_PREDICT},
+        label="sql_generate",
     )

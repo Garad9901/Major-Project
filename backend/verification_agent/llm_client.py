@@ -4,6 +4,8 @@ import os
 
 import requests
 
+from common import llm_metrics
+
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
 
 # Honour the same OLLAMA_READ_TIMEOUT as common/ollama.py.
@@ -118,7 +120,12 @@ Answer to verify:
         timeout=_TIMEOUT,
     )
     resp.raise_for_status()
-    return resp.json()["message"]["content"]
+    body = resp.json()
+    # This module posts to Ollama directly rather than via common.ollama, so it
+    # has to record its own timings — otherwise the slowest stage in the
+    # pipeline would be the one stage missing from the profile.
+    llm_metrics.record("verify", VERIFICATION_MODEL, body)
+    return body["message"]["content"]
 
 
 def correct_answer(question, original_answer, flagged_claims):
@@ -152,4 +159,6 @@ Write the corrected answer."""
         timeout=_TIMEOUT,
     )
     resp.raise_for_status()
-    return resp.json()["message"]["content"].strip()
+    body = resp.json()
+    llm_metrics.record("correct", VERIFICATION_MODEL, body)
+    return body["message"]["content"].strip()

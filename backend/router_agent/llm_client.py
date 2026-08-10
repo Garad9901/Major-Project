@@ -93,4 +93,5 @@ def classify_question(question):
         ],
         options={"temperature": 0, "num_predict": ROUTER_NUM_PREDICT},
         response_format="json",
+        label="router_llm",
     )

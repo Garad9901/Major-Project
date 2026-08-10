@@ -119,6 +119,19 @@ services:
       # match LLM_MAX_CONCURRENCY: on CPU a second concurrent generation does not
       # run in parallel, it just splits the same cores and slows both.
       OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+      # MEASURED AND REJECTED — do not re-add without re-measuring.
+      #
+      # OLLAMA_FLASH_ATTENTION=1 together with OLLAMA_KV_CACHE_TYPE=q8_0 was
+      # tried here to cut prompt-processing time. Median synthesis prompt read
+      # over four identical-shape calls, same machine, minutes apart:
+      #
+      #     default (f16 KV, no flash attention)    6,057 ms
+      #     flash attention + q8_0 KV cache        10,650 ms   <- 1.76x WORSE
+      #
+      # Both are optimisations for GPU kernels. On this CPU-only deployment they
+      # cost time rather than saving it, and the quantised cache also adds a
+      # dequantise step on every attention read. Recorded here because "enable
+      # flash attention" is the obvious next thing anyone will try.
     volumes:
       - ollama_data:/root/.ollama
     # No host port published: Ollama is internal-only, reached by the backend

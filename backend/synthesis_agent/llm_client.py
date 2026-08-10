@@ -94,6 +94,7 @@ def synthesize(question, route, sql_section, rag_section):
         SYNTHESIS_MODEL,
         messages=_messages(question, route, sql_section, rag_section),
         options={"temperature": 0.2, "num_predict": SYNTHESIS_NUM_PREDICT},
+        label="synthesis",
     )
     return content.strip()
 
@@ -106,4 +107,5 @@ def synthesize_stream(question, route, sql_section, rag_section):
         SYNTHESIS_MODEL,
         messages=_messages(question, route, sql_section, rag_section),
         options={"temperature": 0.2, "num_predict": SYNTHESIS_NUM_PREDICT},
+        label="synthesis_stream",
     )

@@ -5,6 +5,7 @@ import os
 
 import requests
 
+from common import llm_metrics
 from common.exceptions import LLMUnavailable
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
@@ -18,21 +19,30 @@ READ_TIMEOUT = float(os.getenv("OLLAMA_READ_TIMEOUT", "120"))
 _TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
 
 
-def chat(model, messages, options=None, response_format=None):
+def chat(model, messages, options=None, response_format=None, label="chat"):
     """Non-streaming chat. Returns the assistant message content string.
-    Raises LLMUnavailable if Ollama is unreachable, times out, or errors."""
+    Raises LLMUnavailable if Ollama is unreachable, times out, or errors.
+
+    `label` names this call in the latency profile (see common/llm_metrics.py);
+    it has no effect on the request itself.
+    """
     payload = {"model": model, "messages": messages, "stream": False, "options": options or {}}
     if response_format is not None:
         payload["format"] = response_format
     try:
         resp = requests.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=_TIMEOUT)
         resp.raise_for_status()
-        return resp.json()["message"]["content"]
+        body = resp.json()
+        # Ollama returns its own prompt-read / generation split alongside the
+        # content. Recording it here means every agent gets profiled without
+        # any agent having to know the profiler exists.
+        llm_metrics.record(label, model, body)
+        return body["message"]["content"]
     except requests.RequestException as exc:
         raise LLMUnavailable(f"Ollama chat request failed: {exc}") from exc
 
 
-def chat_stream(model, messages, options=None):
+def chat_stream(model, messages, options=None, label="chat_stream"):
     """Streaming chat. Yields content pieces as they arrive. Raises
     LLMUnavailable on any failure, including the stream dropping mid-answer.
 
@@ -63,6 +73,11 @@ def chat_stream(model, messages, options=None):
             if piece:
                 yield piece
             if chunk.get("done"):
+                # The final chunk carries the timings for the whole stream.
+                # Recorded before the break so a stream the caller abandons
+                # (Stop generating) records nothing rather than a partial split
+                # that would look like a fast call.
+                llm_metrics.record(label, model, chunk)
                 break
     except requests.RequestException as exc:
         raise LLMUnavailable(f"Ollama streaming chat failed: {exc}") from exc

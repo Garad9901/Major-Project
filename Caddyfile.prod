@@ -66,6 +66,26 @@
 		# form being retargeted at an attacker.
 		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'"
 
+		# HSTS. Only meaningful once this is on the public internet with a real
+		# certificate, which is exactly what CADDY_TLS="" (the default) gives.
+		#
+		# WHY IT MATTERS HERE
+		# Caddy already redirects http:// to https://, but that redirect is
+		# itself served over plain HTTP and can be stripped by anyone on the
+		# path — a student on shared campus wi-fi is the realistic case. HSTS
+		# removes the redirect from the equation: after one clean visit the
+		# browser refuses to speak HTTP to this host at all.
+		#
+		# max-age is one year, the usual value.
+		#
+		# NO includeSubDomains AND NO preload, deliberately. Both are effectively
+		# irreversible — preload requires a removal request and months of
+		# browser-release lag, and includeSubDomains would force HTTPS on every
+		# sibling hostname under the institute's domain, which this deployment
+		# does not control and could take offline. Add them only after the whole
+		# domain is known to be HTTPS-only.
+		Strict-Transport-Security "max-age=31536000"
+
 		# Belt and braces with frame-ancestors, for older browsers.
 		X-Frame-Options "DENY"
 		X-Content-Type-Options "nosniff"

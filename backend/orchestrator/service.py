@@ -3,6 +3,7 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
+from common import llm_metrics
 from common.exceptions import (
     DatabaseUnavailable,
     ServiceUnavailable,
@@ -211,9 +212,15 @@ def answer_question_stream(question, bypass_cache=False):
     # returned the same cached text it would be useless exactly when it matters,
     # so it skips the lookup — and the fresh answer is still STORED, which
     # overwrites the bad entry and repairs it for everyone else.
+    # Created out here rather than inside _generate_stream so the cache lookup
+    # — which embeds the question, an Ollama round trip — is measured as a
+    # stage instead of disappearing into unattributed overhead. It sits on the
+    # critical path to the first token for every question, hit or miss.
+    profile = Profile()
+
     if bypass_cache:
         logger.info("cache bypassed (regenerate) for %r", question[:60])
-        yield from _generate_stream(question)
+        yield from _generate_stream(question, profile)
         return
 
     # CACHE CHECK BEFORE THE SLOT, DELIBERATELY.
@@ -223,7 +230,8 @@ def answer_question_stream(question, bypass_cache=False):
     # simultaneous users, forty-nine of them would be told the assistant is busy
     # and then be handed an answer that was sitting in memory the whole time.
     # Out here, a hit costs no slot and blocks nobody.
-    hit = cache.lookup(question, embed_text)
+    with profile.stage("cache_lookup"):
+        hit = cache.lookup(question, embed_text)
 
     # COALESCE. A plain cache does nothing for simultaneous identical questions:
     # they all look up before the first answer exists, and all miss. If someone
@@ -234,7 +242,8 @@ def answer_question_stream(question, bypass_cache=False):
             leader = True
         else:
             leader = False
-            waited = cache.await_result(question)
+            with profile.stage("coalesce_wait"):
+                waited = cache.await_result(question)
             if waited and waited[0]:
                 hit = (waited[0], waited[1], "coalesced")
             else:
@@ -254,12 +263,22 @@ def answer_question_stream(question, bypass_cache=False):
             "sql": None,
             "rag": None,
         }
+        profile.mark("synthesis_first_token")
         yield "token", answer
-        yield "done", {"answer": answer, "verification": {"verification": "cached"}}
+        # Cache hits are recorded too. Leaving them out would make the
+        # percentiles describe only the slow path, and a p50 computed over
+        # misses alone is not the p50 a user experiences.
+        profile.log(question)
+        _store_profile(question, cached_route, profile, {}, cached=how)
+        yield "done", {
+            "answer": answer,
+            "verification": {"verification": "cached"},
+            "profile": profile.as_dict(),
+        }
         return
 
     try:
-        yield from _generate_stream(question)
+        yield from _generate_stream(question, profile)
     finally:
         # Always release waiters, including on error or client disconnect.
         # _generate_stream publishes the real result via cache.finish() on
@@ -268,11 +287,21 @@ def answer_question_stream(question, bypass_cache=False):
             cache.finish(question)
 
 
-def _generate_stream(question):
+def _generate_stream(question, profile=None):
     """The real pipeline. Separated so the coalescing wrapper above stays
-    readable and so `finally` cleanup is unambiguous."""
-    profile = Profile()
+    readable and so `finally` cleanup is unambiguous.
+
+    `profile` is passed in by the caller so its clock starts at the beginning of
+    the request rather than here — otherwise the cache lookup that precedes this
+    would be invisible, and every reported total would be short by that much.
+    """
+    profile = profile or Profile()
+    # Timed by bracketing the acquire rather than wrapping it in a stage(),
+    # because llm_slot is itself a context manager whose body is the entire
+    # pipeline — wrapping it would time the whole request and call it "waiting".
+    wait_started = profile.total_ms
     with llm_slot(label=f"stream q={question[:40]!r}"):
+        profile.add_stage("slot_wait", wait_started)
         profile.mark("slot_acquired")
         with profile.stage("router"):
             route, reason = _resolve_route(question)
@@ -301,6 +330,9 @@ def _generate_stream(question):
         pieces = []
         first_token_seen = False
         synthesis_started = profile.total_ms
+        # Drained here so the streamed call's own timings are the only thing
+        # add_stage() picks up, not whatever the sources stage left behind.
+        llm_metrics.start()
         for piece in synthesize_answer_stream(
             question, effective_route, sql_result=sql_result, rag_chunks=rag_chunks,
             web_pages=web_pages,
@@ -310,14 +342,7 @@ def _generate_stream(question):
                 profile.mark("synthesis_first_token")
             pieces.append(piece)
             yield "token", piece
-        profile.stages.append({
-            "name": "synthesis",
-            "start_ms": synthesis_started,
-            "end_ms": profile.total_ms,
-            "ms": round(profile.total_ms - synthesis_started, 1),
-            "thread": "main",
-            "error": None,
-        })
+        profile.add_stage("synthesis", synthesis_started)
 
         # VERIFICATION runs only now, because it needs a COMPLETE answer.
         #
@@ -361,6 +386,7 @@ def _generate_stream(question):
             question, effective_route, bool(notes), vmeta.get("verification"),
         )
         profile.log(question)
+        _store_profile(question, effective_route, profile, vmeta)
         yield "done", {
             "answer": final_text,
             "verification": vmeta,
@@ -368,6 +394,52 @@ def _generate_stream(question):
             # measured from a real client, not only read out of server logs.
             "profile": profile.as_dict(),
         }
+
+
+def _store_profile(question, route, profile, vmeta, cached=""):
+    """Persist one question's stage timings. Best-effort, like the audit write.
+
+    A profiler that can break an answer is worse than no profiler, so every
+    failure here is swallowed after logging. Imported inside the function
+    because this module is loaded before the app registry is ready.
+    """
+    try:
+        from .models import QueryProfile
+
+        totals = {"prompt_tokens": 0, "prompt_ms": 0.0, "gen_tokens": 0, "gen_ms": 0.0}
+        for stage in profile.stages:
+            llm = stage.get("llm") or {}
+            for key in totals:
+                value = llm.get(key)
+                if value is not None:
+                    totals[key] += value
+
+        first_token = next(
+            (s["start_ms"] for s in profile.stages if s["name"] == "synthesis_first_token"),
+            None,
+        )
+        QueryProfile.objects.create(
+            question=question,
+            route=route or "",
+            total_ms=profile.total_ms,
+            ttft_ms=first_token,
+            router_ms=profile.get("router"),
+            sql_ms=profile.get("sql"),
+            rag_ms=profile.get("rag"),
+            web_ms=profile.get("web_fetch"),
+            synthesis_ms=profile.get("synthesis"),
+            verification_ms=profile.get("verification"),
+            overhead_ms=profile.overhead_ms(),
+            prompt_tokens=totals["prompt_tokens"] or None,
+            prompt_ms=round(totals["prompt_ms"], 1) or None,
+            gen_tokens=totals["gen_tokens"] or None,
+            gen_ms=round(totals["gen_ms"], 1) or None,
+            verification_tier=(vmeta or {}).get("tier") or "",
+            cached=cached,
+            stages=profile.as_dict(),
+        )
+    except Exception:
+        logger.exception("could not store query profile for %r", question[:60])
 
 
 def _sql_meta(sql_result):
