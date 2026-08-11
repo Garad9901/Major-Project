@@ -8,6 +8,7 @@ from django.contrib.auth import logout as django_logout
 from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.db import DatabaseError
 from django.middleware.csrf import get_token
 from django.utils import timezone
 from rest_framework.decorators import (
@@ -19,7 +20,7 @@ from rest_framework.decorators import (
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from . import lockout
+from . import identity, lockout
 from .authentication import CSRFEnforcingAuthentication
 from .models import UserProfile, profile_for
 from .throttling import LoginRateThrottle
@@ -42,7 +43,36 @@ def _client_ip(request):
 
 
 def _user_payload(user):
-    profile = profile_for(user)
+    """The signed-in user, as the SPA needs it.
+
+    TOLERATES A DATABASE OUTAGE, because /api/auth/me/ is the first call the SPA
+    makes on load. If it 500s, the app cannot paint at all — so a user who is
+    still perfectly able to receive degraded answers sees a broken page instead
+    of a working one, which would waste most of the benefit of keeping sessions
+    in Redis.
+
+    `role` and `theme` come from the profile row and are simply unavailable
+    while Postgres is down; the fallbacks are the least surprising values and
+    are cosmetic. `must_change_password` is NOT cosmetic — it gates access — so
+    it comes from the cached identity written on the last healthy request
+    rather than being defaulted here.
+    """
+    try:
+        profile = profile_for(user)
+    except DatabaseError:
+        logger.warning(
+            "serving /me/ for %r from cached identity — database unavailable",
+            user.username,
+        )
+        return {
+            "username": user.username,
+            "role": "student",
+            "is_staff": user.is_staff,
+            "must_change_password": identity.recall_must_change_password(user.pk),
+            "theme": "system",
+            # Lets the SPA say so, rather than silently showing stale details.
+            "degraded": True,
+        }
     return {
         "username": user.username,
         "role": profile.role,
@@ -98,11 +128,36 @@ def login(request):
     # only to count failures and check the lock; every response below is the
     # same regardless of what is found here.
     from django.contrib.auth.models import User
-    existing = User.objects.filter(username=username).first()
-    profile = profile_for(existing) if existing else None
-    locked = bool(profile and lockout.is_locked(profile))
+    try:
+        existing = User.objects.filter(username=username).first()
+        profile = profile_for(existing) if existing else None
+        locked = bool(profile and lockout.is_locked(profile))
 
-    user = authenticate(request, username=username, password=password)
+        user = authenticate(request, username=username, password=password)
+    except DatabaseError as exc:
+        # SIGNING IN STILL NEEDS POSTGRES, AND ALWAYS WILL.
+        #
+        # Sessions moved to Redis so that an already-signed-in user survives a
+        # database outage (see SESSION_ENGINE in settings/base.py). Verifying a
+        # password cannot move with them: the user row and the password hash
+        # live in Postgres, and checking a credential against a store you
+        # cannot read is not something to work around.
+        #
+        # So this path is expected to fail during a database outage. What is
+        # NOT acceptable is HOW it used to fail — an unhandled OperationalError
+        # became a 500, which in development rendered a 198 KB debug traceback
+        # and in production is an opaque server error that tells the user
+        # nothing and invites them to retry immediately.
+        #
+        # 503 with a plain sentence is the honest answer: this is temporary,
+        # it is our end, and there is nothing for the user to fix.
+        logger.error("login unavailable: database error for username=%r: %s", username, exc)
+        return Response(
+            {"error": "Sign-in is temporarily unavailable while the college "
+                      "records system is being restored. Please try again in a "
+                      "few minutes. Anyone already signed in can continue."},
+            status=503,
+        )
 
     if locked:
         # Password checked FIRST so the lock is only disclosed to someone who

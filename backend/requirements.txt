@@ -12,3 +12,7 @@ gunicorn>=22.0
 sqlglot>=25.0
 qdrant-client>=1.9
 requests>=2.32
+# Backs Django's RedisCache, which holds sessions, the login lockout and the
+# DRF throttle counters. Django ships the cache backend itself; this is the
+# client library it imports.
+redis>=5.0

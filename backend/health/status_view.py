@@ -57,6 +57,28 @@ def _database():
         return cur.fetchone() is not None
 
 
+def _redis():
+    """Sessions, the login lockout and the rate-limit counters.
+
+    ITS OWN ROW, not folded into "Database", because the failure it represents
+    is completely different and the remedy is different. Postgres down means
+    answers lose their records lookup but signed-in users keep working. Redis
+    down means NOBODY is signed in — every session evaporates at once, and the
+    symptom an operator sees is "everyone got logged out", which points nowhere
+    near a database row on a status page.
+
+    Writes and reads back rather than pinging, because a Redis that accepts
+    connections but refuses writes — which is exactly what `maxmemory-policy
+    noeviction` does when full — would pass a ping and still be unable to hold
+    a single new session.
+    """
+    from django.core.cache import cache
+
+    probe = "health-probe"
+    cache.set(probe, "ok", 10)
+    return cache.get(probe) == "ok"
+
+
 def _readonly_role():
     """The read-only path specifically, which the app-owner check does not cover.
 
@@ -130,6 +152,7 @@ def _index_is_fresh():
 
 CHECKS = [
     ("Database", _database, "Postgres — records, accounts and history"),
+    ("Sessions & sign-in", _redis, "Redis — keeps people signed in and enforces the login lockout"),
     ("Read-only DB role", _readonly_role, "The restricted account the assistant queries with"),
     ("Language model", ollama.ping, "Ollama — answers questions"),
     ("Search index", vector_store.ping, "Qdrant — finds descriptive content"),
@@ -140,7 +163,18 @@ CHECKS = [
 # What to do about each, shown only when that component is down. An operator
 # reading this page is often not the person who built it.
 REMEDY = {
-    "Database": "docker compose ... restart postgres — then check disk space on the server.",
+    "Database": (
+        "docker compose ... restart postgres — then check disk space on the server. "
+        "Signed-in users can still ask questions while this is down; their answers "
+        "come from the search index and say so. New sign-ins will not work until "
+        "it is back."
+    ),
+    "Sessions & sign-in": (
+        "docker compose ... restart redis. Everyone is signed out until it returns, "
+        "and signing back in works as soon as it does. If it restarts but stays red, "
+        "check `docker compose logs --tail 50 redis` for OOM — the keyspace is capped "
+        "and set to reject writes rather than silently evict people's sessions."
+    ),
     "Read-only DB role": "Restart the backend; it recreates the role and its grants on startup.",
     "Language model": "docker compose ... restart ollama. First start after a restart is slow while the model loads.",
     "Search index": "docker compose ... restart qdrant. Descriptive answers degrade; database answers keep working.",

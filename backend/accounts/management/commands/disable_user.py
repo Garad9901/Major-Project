@@ -1,9 +1,9 @@
 # Copyright (c) 2026 Yash Garad. All rights reserved.
 
 from django.contrib.auth.models import User
-from django.contrib.sessions.models import Session
 from django.core.management.base import BaseCommand, CommandError
-from django.utils import timezone
+
+from accounts import sessions
 
 
 class Command(BaseCommand):
@@ -41,11 +41,11 @@ class Command(BaseCommand):
         # SessionAuthentication does re-check is_active, so this is belt and
         # braces — but relying on that alone would leave any future
         # authentication class as a hole.
-        killed = 0
-        for session in Session.objects.filter(expire_date__gte=timezone.now()):
-            if str(session.get_decoded().get("_auth_user_id")) == str(user.pk):
-                session.delete()
-                killed += 1
+        #
+        # This WAS a scan of the django_session table, which returned zero the
+        # moment sessions moved to Redis — silently revoking nothing while
+        # reporting success. accounts/sessions.revoke_all handles both stores.
+        killed = sessions.revoke_all(user)
 
         self.stdout.write(self.style.SUCCESS(
             f"Disabled {user.username} and destroyed {killed} live session(s)."

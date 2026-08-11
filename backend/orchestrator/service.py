@@ -45,6 +45,28 @@ RAG_DOWN_SQL_FALLBACK_NOTE = (
 )
 
 
+class _UnavailableSql:
+    """Stands in for a SQL result when the database could not be reached.
+
+    Duck-types sql_agent.service.SqlAgentResult well enough for the three
+    consumers that matter — synthesis_agent.untrusted.fence_sql_rows,
+    verification_agent.service._format_sql_section and orchestrator._sql_meta —
+    all of which branch on `.error` first and already carry carefully worded
+    text distinguishing "the lookup broke" from "there is nothing there".
+
+    Reusing that path rather than writing new wording is deliberate: it is the
+    text that was argued over and tested after the original audit, and a second
+    near-copy would be a second thing to keep correct.
+    """
+
+    rows = None
+    columns = None
+    generated_sql = None
+
+    def __init__(self, exc):
+        self.error = f"the records database was unreachable ({exc})"
+
+
 def _resolve_route(question):
     # classify() can raise LLMUnavailable (Ollama down) — we let that propagate,
     # since if the LLM is down synthesis can't run either. A *parse* failure
@@ -113,6 +135,21 @@ def _gather_sources(question, route, profile=None):
             except DatabaseUnavailable as exc:
                 logger.warning("SQL source down (route=BOTH), degrading to RAG-only: %s", exc)
                 notes.append(DB_DOWN_NOTE)
+                # Tell the model the lookup was UNAVAILABLE, not that there is
+                # no data. Leaving sql_result as None renders as "Database
+                # rows: none." in the prompt, and the model reads that as
+                # absence — measured during the Redis-sessions resilience test,
+                # with Postgres stopped:
+                #
+                #   "The college records do not cover the total number of
+                #    faculty holding the Lecturer rank"
+                #
+                # against a table holding 3,053 of them. That is the same
+                # confident-false-negative that was the worst finding of the
+                # original production audit, arriving by a different route: the
+                # careful wording in synthesis_agent/untrusted.py only fires
+                # when `.error` is set, and an outage never set it.
+                sql_result = _UnavailableSql(exc)
             try:
                 rag_chunks = f_rag.result()
             except VectorStoreUnavailable as exc:

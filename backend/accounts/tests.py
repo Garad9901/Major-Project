@@ -2,8 +2,9 @@
 
 """Session lifetime, and the operator-driven password reset."""
 
-from datetime import timedelta
+from importlib import import_module
 from io import StringIO
+from unittest import mock
 
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -11,9 +12,10 @@ from django.contrib.sessions.models import Session
 from django.core.cache import cache
 from django.core.management import call_command
 from django.test import Client, TestCase
-from django.utils import timezone
 
-from accounts import lockout
+from django.db import DatabaseError
+
+from accounts import lockout, sessions
 from accounts.models import UserProfile, profile_for
 
 PW = "Session-Test-Pw-8823"
@@ -49,22 +51,52 @@ class SessionTimeoutTests(TestCase):
     def test_active_session_works(self):
         self.assertEqual(self.client.get("/api/conversations/").status_code, 200)
 
+    # THESE TWO WERE REWRITTEN when sessions moved from Postgres to Redis.
+    #
+    # They used to read and write `Session.objects`, the database model. That
+    # table is empty now, so the old versions raised Session.DoesNotExist —
+    # loudly, which is the good case. The bad case would have been a test that
+    # kept passing while testing nothing, so they are rewritten against the
+    # configured session store rather than deleted.
+
+    def test_session_is_stored_in_the_cache_not_the_database(self):
+        """The whole point of the change, asserted directly."""
+        key = self.client.session.session_key
+        self.assertFalse(
+            Session.objects.filter(session_key=key).exists(),
+            "session was written to Postgres — SESSION_ENGINE is not cache-backed",
+        )
+        self.assertIn("cache", settings.SESSION_ENGINE)
+
     def test_expired_session_is_rejected(self):
-        session = Session.objects.get(session_key=self.client.session.session_key)
-        session.expire_date = timezone.now() - timedelta(minutes=1)
-        session.save()
+        """Expiry for a cache-backed session IS the cache key expiring."""
+        store = import_module(settings.SESSION_ENGINE).SessionStore
+        key = self.client.session.session_key
+        store(session_key=key).delete()
         self.assertIn(self.client.get("/api/conversations/").status_code, (401, 403))
 
     def test_activity_extends_the_session(self):
-        """A request must push the expiry further out, or it is not idle-based."""
+        """A request must push the expiry further out, or it is not idle-based.
+
+        Reads the key's TTL straight from Redis. Django's cache API has no
+        getter for a remaining TTL, so this reaches for the underlying client —
+        acceptable here because the assertion is specifically about expiry
+        behaviour, which is what a session timeout is.
+        """
         key = self.client.session.session_key
-        before = Session.objects.get(session_key=key).expire_date
-        Session.objects.filter(session_key=key).update(
-            expire_date=timezone.now() + timedelta(minutes=5)
-        )
+        cache_key = f"django.contrib.sessions.cache{key}"
+        client = cache._cache.get_client()
+        full_key = cache.make_key(cache_key)
+
+        client.expire(full_key, 60)  # pretend only a minute is left
+        shortened = client.ttl(full_key)
         self.client.get("/api/conversations/")
-        after = Session.objects.get(session_key=key).expire_date
-        self.assertGreater(after, before - timedelta(seconds=1))
+        after = client.ttl(full_key)
+
+        self.assertGreater(
+            after, shortened,
+            "activity did not re-stamp the session TTL — the timeout is not idle-based",
+        )
 
 
 class PasswordResetTests(TestCase):
@@ -183,16 +215,51 @@ class BruteForceLockoutTests(TestCase):
         self.assertEqual(unlocked_wrong.json(), locked_wrong.json())
 
     def test_lock_expires(self):
+        """REWRITTEN: Redis is now authoritative, so the lock expires there.
+
+        The old version aged `profile.locked_until` into the past and expected
+        the lock to lift. It no longer does, and that is correct rather than a
+        regression: if backdating a database column could unlock an account,
+        the Redis counter would not be authoritative at all and the fallback
+        ordering in accounts/lockout.py would be the wrong way round.
+
+        Expiry in Redis is the key's TTL, so this deletes the key — which is
+        what the TTL does a quarter of an hour later.
+        """
         for _ in range(5):
             self._attempt("wrong")
-        profile = profile_for(self.user)
-        self.assertTrue(lockout.is_locked(profile))
+        self.assertTrue(lockout.is_locked(profile_for(self.user)))
 
-        profile.locked_until = timezone.now() - timedelta(seconds=1)
-        profile.save(update_fields=["locked_until"])
+        cache.delete(lockout._lock_key("frank"))
+        cache.delete(lockout._fail_key("frank"))
 
         self.assertFalse(lockout.is_locked(profile_for(self.user)))
         self.assertEqual(self._attempt(PW).status_code, 200)
+
+    def test_lock_survives_a_cache_outage_via_the_profile(self):
+        """FAILS CLOSED. Losing Redis must not unlock a locked account.
+
+        The mirrored profile column exists for exactly this: if the cache
+        cannot be read, the lock is still known. The alternative — failing open
+        — would hand an attacker a clean slate by taking Redis down, which is a
+        strictly easier attack than guessing the password.
+        """
+        for _ in range(5):
+            self._attempt("wrong")
+        profile = profile_for(self.user)
+        self.assertIsNotNone(profile.locked_until, "lock was not mirrored to the profile")
+
+        with mock.patch("accounts.lockout.cache") as broken:
+            broken.get.side_effect = RuntimeError("redis is down")
+            self.assertTrue(
+                lockout.is_locked(profile_for(self.user)),
+                "a cache outage unlocked a locked account",
+            )
+
+    def test_counter_lives_in_the_cache_not_only_the_database(self):
+        """A failed login must not require a write to the records database."""
+        self._attempt("wrong")
+        self.assertEqual(cache.get(lockout._fail_key("frank")), 1)
 
     def test_successful_login_clears_the_counter(self):
         for _ in range(3):
@@ -318,3 +385,127 @@ class LoginThrottleCountsFailuresOnlyTests(TestCase):
         # The tenth failure exhausts the budget; the eleventh is refused.
         self.assertEqual(self._login("target", "wrong-password").status_code, 401)
         self.assertEqual(self._login("target", "wrong-password").status_code, 429)
+
+
+class SessionRevocationTests(TestCase):
+    """Forcibly signing one user out, now that sessions are not database rows.
+
+    This is incident-response tooling: it is used when an account is believed
+    compromised. The previous implementation scanned `django_session`, which
+    became an empty table the moment sessions moved to Redis — so it would have
+    reported "destroyed 0 sessions" and left the attacker signed in. These
+    tests exist so that cannot happen again unnoticed.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.user = _make_user("grace")
+        self.other = _make_user("heidi")
+
+    def _signed_in(self, username):
+        c = Client()
+        c.login(username=username, password=PW)
+        return c
+
+    def test_revoke_all_ends_a_live_session(self):
+        c = self._signed_in("grace")
+        self.assertEqual(c.get("/api/conversations/").status_code, 200)
+
+        destroyed = sessions.revoke_all(self.user)
+
+        self.assertEqual(destroyed, 1)
+        self.assertIn(c.get("/api/conversations/").status_code, (401, 403))
+
+    def test_revoke_all_reports_a_truthful_count(self):
+        """Not 'number of keys in the index' — number actually destroyed."""
+        self._signed_in("grace")
+        self._signed_in("grace")
+        self.assertEqual(sessions.revoke_all(self.user), 2)
+        # Second call finds them already gone and must not double-count.
+        self.assertEqual(sessions.revoke_all(self.user), 0)
+
+    def test_revoking_one_user_does_not_touch_another(self):
+        grace = self._signed_in("grace")
+        heidi = self._signed_in("heidi")
+
+        sessions.revoke_all(self.user)
+
+        self.assertIn(grace.get("/api/conversations/").status_code, (401, 403))
+        self.assertEqual(heidi.get("/api/conversations/").status_code, 200,
+                         "revoking one account signed out an unrelated user")
+
+    def test_login_indexes_the_session_key(self):
+        """The signal has to be connected, or revocation finds nothing.
+
+        Worth its own test because the failure mode is silent: an unconnected
+        receiver leaves an empty index and revoke_all() returns 0 without
+        raising anything.
+        """
+        c = self._signed_in("grace")
+        indexed = cache.get(f"user-sessions:{self.user.pk}") or []
+        self.assertIn(c.session.session_key, indexed)
+
+    def test_disable_user_command_still_revokes(self):
+        c = self._signed_in("grace")
+        call_command("disable_user", "grace", stdout=StringIO())
+        self.assertIn(c.get("/api/conversations/").status_code, (401, 403))
+
+    def test_revocation_survives_an_empty_index(self):
+        """The index is a convenience; the auth hash is the guarantee.
+
+        Even with the index wiped — a Redis restart, a bug, anything — changing
+        the password must still end every session, because Django re-derives
+        the session auth hash from the password on every request. This is the
+        mechanism that has no single point of failure, so it is tested
+        separately from the index.
+        """
+        c = self._signed_in("grace")
+        cache.delete(f"user-sessions:{self.user.pk}")
+
+        self.user.set_password("A-Completely-Different-9134")
+        self.user.save(update_fields=["password"])
+
+        self.assertIn(c.get("/api/conversations/").status_code, (401, 403))
+
+
+class LoginDuringDatabaseOutageTests(TestCase):
+    """A new sign-in during a Postgres outage must fail CLEANLY.
+
+    It is expected to fail: the password hash lives in Postgres and cannot be
+    checked without it. That is not the resilience gap Redis sessions were
+    added to fix, and it is not treated as one.
+
+    What was unacceptable was the SHAPE of the failure — an unhandled
+    OperationalError became a 500, which in development rendered a 198 KB debug
+    traceback. A 503 with a plain sentence says the same thing honestly.
+    """
+
+    def setUp(self):
+        cache.clear()
+        _make_user("ivan")
+
+    def test_database_error_is_a_503_not_a_500(self):
+        with mock.patch("accounts.views.authenticate", side_effect=DatabaseError("down")):
+            resp = Client().post(
+                "/api/auth/login/",
+                data={"username": "ivan", "password": PW},
+                content_type="application/json",
+            )
+        self.assertEqual(resp.status_code, 503)
+
+    def test_the_message_is_useful_and_leaks_nothing(self):
+        with mock.patch("accounts.views.authenticate",
+                        side_effect=DatabaseError('FATAL: role "x" does not exist')):
+            resp = Client().post(
+                "/api/auth/login/",
+                data={"username": "ivan", "password": PW},
+                content_type="application/json",
+            )
+        body = resp.json()["error"]
+        self.assertIn("temporarily unavailable", body)
+        # The database's own error text must not reach the user.
+        self.assertNotIn("FATAL", body)
+        self.assertNotIn("role", body)
+        # It should tell an already-signed-in user they are unaffected, which
+        # is the whole point of the Redis change.
+        self.assertIn("already signed in", body)

@@ -197,3 +197,50 @@ class TitleTests(TestCase):
 
     def test_title_collapses_newlines(self):
         self.assertNotIn("\n", title_from("line one\nline two\n\nline three"))
+
+
+class DatabaseOutageIsNotAbsenceTests(TestCase):
+    """A database outage must never be described to the model as "no data".
+
+    THE DEFECT THIS PINS DOWN, found by the Redis-sessions resilience test:
+    when Postgres was stopped mid-question, _gather_sources degraded to RAG and
+    left sql_result as None. None renders as "Database rows: none." in the
+    synthesis prompt, and the model duly told the user:
+
+        "The college records do not cover the total number of faculty holding
+         the Lecturer rank"
+
+    against a table holding 3,053 of them. A confident false negative produced
+    by an outage is the exact failure the original production audit called the
+    worst shape this system has, and it came back through a path that audit did
+    not cover — its fix keyed off sql_result.error, which an outage never set.
+    """
+
+    def test_unavailable_sql_is_described_as_a_failed_lookup(self):
+        from orchestrator.service import _UnavailableSql
+        from synthesis_agent.untrusted import fence_sql_rows
+
+        rendered = fence_sql_rows(_UnavailableSql(Exception("connection refused")))
+
+        self.assertIn("FAILED", rendered)
+        self.assertIn("does NOT mean the records are absent", rendered)
+        self.assertNotIn("Database rows: none", rendered)
+
+    def test_verification_also_sees_a_failed_lookup_not_an_empty_one(self):
+        """Or the verifier rubber-stamps the false negative as consistent."""
+        from orchestrator.service import _UnavailableSql
+        from verification_agent.service import _format_sql_section
+
+        rendered = _format_sql_section(_UnavailableSql(Exception("down")))
+
+        self.assertIn("FAILED", rendered)
+        self.assertIn("UNSUPPORTED", rendered)
+
+    def test_meta_does_not_claim_zero_rows_were_found(self):
+        from orchestrator.service import _UnavailableSql, _sql_meta
+
+        meta = _sql_meta(_UnavailableSql(Exception("down")))
+
+        self.assertIsNotNone(meta["error"])
+        self.assertEqual(meta["row_count"], 0)
+        self.assertIsNone(meta["generated_sql"])

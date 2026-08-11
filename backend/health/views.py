@@ -32,6 +32,10 @@ def health_check(request):
     breakdown so it's obvious which one failed."""
     services = {
         "database": _check_database(),
+        # Sessions and the login lockout live here. Reported separately from
+        # the database because the two outages look nothing alike to a user:
+        # Postgres down degrades answers, Redis down signs everybody out.
+        "sessions": _check_sessions(),
         "llm": _check_llm(),
         "vector_store": _check_vector_store(),
     }
@@ -51,6 +55,20 @@ def _check_database():
         return True
     except Exception as exc:
         logger.warning("health: database check failed: %s", exc)
+        return False
+
+
+def _check_sessions():
+    """Round-trips a value rather than pinging: a Redis at its memory ceiling
+    accepts connections and refuses writes, which a ping would call healthy
+    while no new session could be stored. See status_view._redis."""
+    try:
+        from django.core.cache import cache
+
+        cache.set("health-probe", "ok", 10)
+        return cache.get("health-probe") == "ok"
+    except Exception as exc:
+        logger.warning("health: session store check failed: %s", exc)
         return False
 
 

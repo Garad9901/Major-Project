@@ -1,7 +1,9 @@
 # Copyright (c) 2026 Yash Garad. All rights reserved.
 
+from django.db import DatabaseError
 from rest_framework.permissions import BasePermission
 
+from . import identity
 from .models import profile_for
 
 
@@ -44,7 +46,27 @@ class CanUseAssistant(BasePermission):
         if not (user and user.is_authenticated and user.is_active):
             return False
 
-        if profile_for(user).must_change_password:
+        try:
+            must_change = profile_for(user).must_change_password
+            # Refresh the fallback copy while the database is healthy, so the
+            # branch below has something current to fall back TO.
+            identity.remember(user, must_change_password=must_change)
+        except DatabaseError:
+            # THE DATABASE IS DOWN. This check reads user_profile, so it cannot
+            # be answered from the live row — but refusing the request here
+            # would defeat the whole point of surviving the outage, and letting
+            # it through unchecked would drop a real control.
+            #
+            # The flag was cached on the last healthy request (see
+            # accounts/identity.py), so use that. It defaults to False only
+            # when nothing was ever cached, which means this account has not
+            # made a successful request since the backend started — and the
+            # accounts this protects against are ones that have never signed in
+            # successfully at all, so a fresh account cannot slip through: it
+            # has no session either.
+            must_change = identity.recall_must_change_password(user.pk, default=False)
+
+        if must_change:
             self.message = (
                 "You must change your initial password before using the assistant."
             )

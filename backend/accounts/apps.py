@@ -16,3 +16,10 @@ class AccountsConfig(AppConfig):
         from config.secret_guards import register_checks
 
         register_checks()
+
+        # Connects the user_logged_in receiver that indexes each session key
+        # against its user. Without this import the module is never loaded, the
+        # signal never fires, and revoke_all() finds an empty index — which
+        # would fail SILENTLY, reporting zero sessions revoked rather than an
+        # error. Imported for the side effect; see accounts/sessions.py.
+        from . import sessions  # noqa: F401

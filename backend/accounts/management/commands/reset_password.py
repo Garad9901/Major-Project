@@ -31,10 +31,9 @@ the security control. The security control is Django's, and it is automatic.
 """
 
 from django.contrib.auth.models import User
-from django.contrib.sessions.models import Session
 from django.core.management.base import BaseCommand, CommandError
-from django.utils import timezone
 
+from accounts import sessions
 from accounts.models import profile_for
 
 from ._provision import generate_initial_password
@@ -52,20 +51,18 @@ class Command(BaseCommand):
     def _kill_sessions(self, user):
         """End every active session for this user.
 
-        Django has no user->session index, so this walks unexpired sessions and
-        decodes each one. Fine for 50 users; it would need a session model with
-        a user FK at a much larger scale.
+        Delegates to accounts/sessions.revoke_all, which handles both the Redis
+        session index and any remaining django_session rows. The previous
+        implementation walked the database table only, and returned zero once
+        sessions moved to Redis — reporting "destroyed 0 sessions" on a password
+        reset that was quite possibly being done because the account was
+        compromised.
+
+        Note that changing the password ALSO invalidates every session on its
+        own, through Django's session auth-hash check, without any index. That
+        is the guarantee; this call is what makes it immediate and countable.
         """
-        killed = 0
-        for session in Session.objects.filter(expire_date__gte=timezone.now()):
-            try:
-                data = session.get_decoded()
-            except Exception:
-                continue  # corrupt or unreadable — leave it to expire
-            if str(data.get("_auth_user_id")) == str(user.pk):
-                session.delete()
-                killed += 1
-        return killed
+        return sessions.revoke_all(user)
 
     def handle(self, *args, **options):
         username = options["username"]

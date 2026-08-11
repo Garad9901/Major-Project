@@ -205,6 +205,23 @@ for u in User.objects.order_by('username'):
 
 ## 3. Checking system health
 
+### There are exactly THREE health URLs. There is no `/ready/`.
+
+Getting this wrong wastes an outage. During resilience testing a check script
+probed `/api/health/ready/` — which has never existed — and separately called
+`.json()` on the HTML status page. Both failed, and the report read "health
+endpoint: HTTP None" through four consecutive tests, which looked exactly like
+the health system itself being down. It was not.
+
+| URL | Returns | Use it for |
+|---|---|---|
+| `/api/health/live/` | JSON, always 200 while the process is up | Liveness only. Deliberately checks **no** dependencies, so an Ollama outage never marks the backend itself unhealthy. This is what the container healthcheck uses. |
+| `/api/health/` | JSON, **200 all up / 503 any down**, with a per-service breakdown | Monitoring, scripts, uptime checks. |
+| `/api/health/status/` | **HTML**, 200 all up / 503 any down | A person, in a browser. Not parseable as JSON — do not try. |
+
+Anything else 404s, and a 404 from the SPA catch-all looks like a page rather
+than an error, which is how the wrong path went unnoticed.
+
 ### The status page — start here
 
 **`https://rag.college.edu/api/health/status/`**
@@ -220,8 +237,22 @@ watch that URL directly.
 
 ```bash
 curl -s https://rag.college.edu/api/health/ | jq
-# {"status":"ok","services":{"database":"up","llm":"up","vector_store":"up"}}
+# {"status":"ok","services":{"database":"up","sessions":"up","llm":"up","vector_store":"up"}}
 ```
+
+### What each component failing actually looks like
+
+The two most confusable rows are **Database** and **Sessions & sign-in**, because
+they fail in opposite directions:
+
+| Down | What users see | What still works |
+|---|---|---|
+| **Database** (Postgres) | New sign-ins fail with "sign-in is temporarily unavailable". Answers lose their records lookup and say so. | **Anyone already signed in keeps working.** Sessions are in Redis, not Postgres. |
+| **Sessions & sign-in** (Redis) | *Everyone* is signed out at once, and nobody can sign back in. | Nothing user-facing. |
+
+"Everybody got logged out" therefore points at **Redis**, not at the database —
+which is the whole reason it has its own row rather than being folded into one
+"storage" line.
 
 ### Are the containers up?
 
@@ -398,9 +429,11 @@ sh scripts/restore.sh ./backups/<timestamp>
 
 | Task | Command |
 |---|---|
-| Status page | `https://rag.college.edu/api/health/status/` |
-| Health JSON | `curl -s https://.../api/health/` |
+| Status page (HTML, for a person) | `https://rag.college.edu/api/health/status/` |
+| Health JSON (for monitoring) | `curl -s https://.../api/health/` |
+| Liveness only (no dependencies) | `curl -s https://.../api/health/live/` |
 | Containers | `dcp ps` |
+| Everyone logged out? | `dcp restart redis` — sessions live there, not in Postgres |
 | Full check | `sh scripts/verify_deployment.sh` |
 | Add user | `dcp exec backend python manage.py create_user <name> --role staff` |
 | Reset password | `dcp exec backend python manage.py reset_password <name>` |

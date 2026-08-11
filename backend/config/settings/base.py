@@ -11,6 +11,7 @@ ever forgets to override. They are set in development.py / production.py.
 """
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -36,6 +37,95 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 SESSION_COOKIE_HTTPONLY = True  # session cookie is never readable by JavaScript
 SESSION_COOKIE_SAMESITE = "Lax"
+
+# --- cache: Redis --------------------------------------------------------------
+# Backs three things, all of which used to be somewhere worse:
+#
+#   sessions       were in Postgres. See SESSION_ENGINE below for why that was
+#                  a resilience problem serious enough to add a service for.
+#   login lockout  was a row update in Postgres on every failed attempt, so a
+#                  password-guessing burst wrote to the records database.
+#   DRF throttles  had NO cache configured, so they silently used LocMemCache —
+#                  per PROCESS. That is correct today only because production
+#                  runs one gunicorn worker; a second worker would have doubled
+#                  every published rate limit without anyone noticing. Now the
+#                  counters are shared, so the limits mean what they say
+#                  regardless of worker count.
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+
+# TESTS GET THEIR OWN REDIS DATABASE. THIS IS A SAFETY INTERLOCK, NOT TIDINESS.
+#
+# Django gives the test runner a separate DATABASE automatically. It does no
+# such thing for caches, so `manage.py test` would run against whatever Redis
+# this process is pointed at — and the lockout tests call `cache.clear()` in
+# setUp, which is FLUSHDB. Running the suite against a live deployment would
+# therefore sign out every user, drop every lockout and reset every rate limit,
+# with no error and nothing in a log to explain it.
+#
+# Redis numbers its databases; index 1 is a completely separate keyspace from
+# index 0, and FLUSHDB only affects the one selected. Switching indices under
+# test makes the destructive operation harmless.
+#
+# `sys.argv` is an ugly way to detect a test run and is used anyway: the check
+# has to happen at settings-import time, before Django has told anyone a test
+# is starting, so there is nothing better to read.
+_IS_TEST = "test" in sys.argv
+if _IS_TEST and REDIS_URL.endswith("/0"):
+    REDIS_URL = REDIS_URL[:-2] + "/1"
+
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": REDIS_URL,
+        "OPTIONS": {
+            # Bound how long a request will wait on Redis. Without these a
+            # network partition turns every request into a hang rather than an
+            # error, which is worse: gunicorn threads are a fixed, small pool
+            # (1 worker x 4 threads) and four hung requests take the site down
+            # completely. Failing in a second frees the thread.
+            "socket_connect_timeout": float(os.getenv("REDIS_CONNECT_TIMEOUT", "2")),
+            "socket_timeout": float(os.getenv("REDIS_SOCKET_TIMEOUT", "2")),
+            "retry_on_timeout": True,
+        },
+        # Keeps session keys from colliding with anything else sharing the
+        # instance, and makes `redis-cli --scan --pattern 'college:*'` useful.
+        "KEY_PREFIX": os.getenv("REDIS_KEY_PREFIX", "college"),
+    }
+}
+
+# --- where sessions live ---------------------------------------------------------
+# WAS django.contrib.sessions.backends.db, AND THAT WAS A REAL OUTAGE SHAPE.
+#
+# With database-backed sessions, Postgres is a hard dependency of
+# AUTHENTICATION, not merely of answering. Resilience testing showed what that
+# costs: with Postgres stopped, `POST /api/auth/login/` returned HTTP 500 and
+# every request from an already-signed-in user failed on session lookup. The
+# orchestrator has a careful degradation path — database down, answer from the
+# vector store, tell the user the records lookup is unavailable — and it works,
+# and it was unreachable, because nobody could hold a session to reach it.
+#
+# Cache-backed sessions move "who is signed in" to Redis, so that path is now
+# reachable by real users. See docs/RESILIENCE.md for the measured before/after.
+#
+# WHAT THIS DOES NOT FIX, deliberately: logging IN still needs Postgres, because
+# the password hash and the user row live there. A NEW sign-in during a database
+# outage fails, and should — it is not a resilience gap, it is credential
+# verification being unavailable. It now fails with a clean 503 instead of a 500.
+#
+# THE TRADE: Redis is now a hard dependency of sessions. That is a smaller
+# exposure than Postgres was — Redis does one simple thing, holds no queries,
+# and is not the component that falls over under a heavy report — but it is not
+# zero, which is why it runs with restart:always and AOF persistence.
+SESSION_ENGINE = "django.contrib.sessions.backends.cache"
+SESSION_CACHE_ALIAS = "default"
+
+# Sessions in Redis resolve the COOKIE without Postgres. They do not resolve the
+# USER: AuthenticationMiddleware still does `SELECT ... FROM auth_user` on every
+# request, so an already-signed-in user was still getting a 500 during a
+# database outage — measured, after the session change. This backend consults
+# the database first and falls back to a cached identity only when it raises.
+# See accounts/identity.py for the security reasoning.
+AUTHENTICATION_BACKENDS = ["accounts.auth_backends.CachedModelBackend"]
 
 # --- session timeout ----------------------------------------------------------
 # Log a user out after this long with NO activity. 30 minutes by default.
@@ -93,6 +183,12 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
+    # ABOVE SessionMiddleware, deliberately. Middleware wraps the layers below
+    # it, and the session middleware is one of the things that raises when
+    # Redis is unreachable — both on the way in (loading the session) and on
+    # the way out (SESSION_SAVE_EVERY_REQUEST re-saving it). Placed underneath,
+    # this would never see either.
+    "config.middleware.SessionStoreUnavailableMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -163,6 +259,21 @@ DATABASES = {
             # encrypts the link but does not verify the server certificate —
             # see docker/Dockerfile.postgres for the reasoning and the limits.
             "sslmode": os.getenv("POSTGRES_SSLMODE", "require"),
+            # FAIL FAST WHEN POSTGRES IS UNREACHABLE, rather than hanging.
+            #
+            # Found during the Redis-sessions resilience re-test: with Postgres
+            # stopped, GET /api/auth/me/ did not error — it HUNG, and the test
+            # client gave up after 30 seconds. libpq has no connect timeout by
+            # default, so a request waits on the TCP connect for as long as the
+            # OS lets it.
+            #
+            # A hang is worse than an error here, and specifically worse than it
+            # looks. Production runs ONE gunicorn worker with FOUR threads: four
+            # hung requests occupy every thread and the whole site stops
+            # responding, including the cached answers and the status page that
+            # would tell an operator what is wrong. An error frees the thread
+            # immediately and degrades one request instead of all of them.
+            "connect_timeout": int(os.getenv("POSTGRES_CONNECT_TIMEOUT", "3")),
         },
     }
 }
