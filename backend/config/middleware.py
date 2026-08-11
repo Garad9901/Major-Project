@@ -30,6 +30,7 @@ worse than the 500 it replaced.
 
 import logging
 
+from django.contrib.sessions.middleware import SessionMiddleware
 from django.http import JsonResponse
 
 logger = logging.getLogger("django.request")
@@ -79,3 +80,37 @@ class SessionStoreUnavailableMiddleware:
             "session store unavailable on %s %s: %s", request.method, request.path, exc
         )
         return JsonResponse({"error": UNAVAILABLE}, status=503)
+
+
+class ResilientSessionMiddleware(SessionMiddleware):
+    """Django's SessionMiddleware, minus the 500 when the store is unreachable.
+
+    WHY THE MIDDLEWARE ABOVE IS NOT SUFFICIENT
+    Django wraps EVERY middleware in `convert_exception_to_response`. An
+    exception raised inside SessionMiddleware is therefore turned into a 500 by
+    the wrapper immediately around it, and never propagates to a middleware
+    higher up the stack — so no amount of try/except in
+    SessionStoreUnavailableMiddleware can see it.
+
+    That matters because of SESSION_SAVE_EVERY_REQUEST. The idle-timeout design
+    re-saves the session on the way OUT of every request, which means a Redis
+    outage raises during the RESPONSE phase, after the view has finished. The
+    observed effect was precisely that: the request produced a correct 503,
+    and then this save failed and replaced it with a 500 carrying a
+    ConnectionError traceback.
+
+    Failing to write a session when the store is down loses nothing: there is
+    nowhere to write it, the user is being told the service is degraded, and
+    the alternative is discarding a good response for a bookkeeping step that
+    could not have succeeded either way.
+    """
+
+    def process_response(self, request, response):
+        try:
+            return super().process_response(request, response)
+        except RedisError as exc:
+            logger.error(
+                "could not save the session on %s %s: %s — returning the response "
+                "anyway", request.method, request.path, exc,
+            )
+            return response

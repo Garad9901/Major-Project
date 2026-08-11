@@ -8,6 +8,7 @@ from unittest import mock
 
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.contrib.sessions.backends.cache import SessionStore as CacheSessionStore
 from django.contrib.sessions.models import Session
 from django.core.cache import cache
 from django.core.management import call_command
@@ -15,7 +16,7 @@ from django.test import Client, TestCase
 
 from django.db import DatabaseError
 
-from accounts import lockout, sessions
+from accounts import identity, lockout, sessions
 from accounts.models import UserProfile, profile_for
 
 PW = "Session-Test-Pw-8823"
@@ -60,13 +61,24 @@ class SessionTimeoutTests(TestCase):
     # configured session store rather than deleted.
 
     def test_session_is_stored_in_the_cache_not_the_database(self):
-        """The whole point of the change, asserted directly."""
+        """The whole point of the change, asserted directly.
+
+        The second assertion used to be `assertIn("cache", SESSION_ENGINE)` —
+        a string match on a module path, which broke the moment the engine was
+        renamed to config.session_store even though the behaviour was
+        unchanged. It now checks the property that actually matters: whatever
+        the module is called, the store is a cache-backed one.
+        """
         key = self.client.session.session_key
         self.assertFalse(
             Session.objects.filter(session_key=key).exists(),
             "session was written to Postgres — SESSION_ENGINE is not cache-backed",
         )
-        self.assertIn("cache", settings.SESSION_ENGINE)
+        store = import_module(settings.SESSION_ENGINE).SessionStore
+        self.assertTrue(
+            issubclass(store, CacheSessionStore),
+            f"{settings.SESSION_ENGINE} is not a cache-backed session store",
+        )
 
     def test_expired_session_is_rejected(self):
         """Expiry for a cache-backed session IS the cache key expiring."""
@@ -509,3 +521,81 @@ class LoginDuringDatabaseOutageTests(TestCase):
         # It should tell an already-signed-in user they are unaffected, which
         # is the whole point of the Redis change.
         self.assertIn("already signed in", body)
+
+
+class IdentityIsCachedAtLoginTests(TestCase):
+    """A user who signs in and IMMEDIATELY hits a database outage must survive.
+
+    THE BUG THIS PINS DOWN
+    identity.remember() was only called from CachedModelBackend.get_user and
+    from CanUseAssistant, both of which run on a LATER request. So the fallback
+    was populated by the *second* request of a session, not the first. A user
+    who signed in and then hit an outage before doing anything else had nothing
+    cached and got a 403 — which is the sequence a person performs at the start
+    of the working day, and the one the live re-test happened to exercise.
+
+    Earlier resilience runs passed only because they asked a baseline question
+    first, which populated the cache as a side effect.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.user = _make_user("kira")
+
+    def test_login_alone_populates_the_identity_fallback(self):
+        client = Client()
+        self.assertEqual(
+            client.post(
+                "/api/auth/login/",
+                data={"username": "kira", "password": PW},
+                content_type="application/json",
+            ).status_code,
+            200,
+        )
+
+        recalled = identity.recall(self.user.pk)
+        self.assertIsNotNone(
+            recalled,
+            "nothing was cached at login; a database outage immediately after "
+            "signing in would sign this user out",
+        )
+        self.assertEqual(recalled.username, "kira")
+        self.assertTrue(recalled.is_active)
+
+    def test_the_permission_flag_is_cached_too(self):
+        """CanUseAssistant reads it, and reads it from here during an outage."""
+        Client().post(
+            "/api/auth/login/",
+            data={"username": "kira", "password": PW},
+            content_type="application/json",
+        )
+        self.assertFalse(identity.recall_must_change_password(self.user.pk, default=True))
+
+    def test_an_authenticated_request_works_with_the_database_unreachable(self):
+        """End to end: sign in, database dies, next request still authenticates."""
+        client = Client()
+        client.post(
+            "/api/auth/login/",
+            data={"username": "kira", "password": PW},
+            content_type="application/json",
+        )
+
+        # BOTH reads have to fail, or this is not an outage. get_user loads
+        # auth_user; _user_payload loads user_profile. Patching only the first
+        # left the profile read hitting a live database and the test asserting
+        # a degraded response that never happened.
+        with mock.patch(
+            "django.contrib.auth.backends.ModelBackend.get_user",
+            side_effect=DatabaseError("could not connect"),
+        ), mock.patch(
+            "accounts.views.profile_for",
+            side_effect=DatabaseError("could not connect"),
+        ):
+            response = client.get("/api/auth/me/")
+
+        self.assertEqual(
+            response.status_code, 200,
+            "the session did not survive a database outage",
+        )
+        self.assertEqual(response.json()["username"], "kira")
+        self.assertTrue(response.json().get("degraded"))

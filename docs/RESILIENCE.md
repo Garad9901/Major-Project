@@ -102,7 +102,7 @@ fix.
 | With Redis stopped | Result |
 |---|---|
 | Health | `database: up`, **`sessions: down`** |
-| Existing session | HTTP 403 — signed out |
+| Existing session | **HTTP 503** — signed out, and told the service is down rather than that they were denied |
 | New sign-in | **HTTP 503** + plain sentence (was 500 until fixed, see below) |
 | Recovery | sign-in works immediately; answers normal |
 
@@ -162,7 +162,7 @@ worst failure shape this system has — arriving through a path that audit's fix
 did not cover. Its careful wording in `synthesis_agent/untrusted.py` keys off
 `sql_result.error`, and an outage never set one.
 
-**Fixed** by passing `_UnavailableSql` instead of `None`, which routes the
+**First attempt** was to pass `_UnavailableSql` instead of `None`, routing the
 outage through that existing, tested wording:
 
 ```
@@ -175,58 +175,109 @@ Three regression tests pin it, covering synthesis, verification and the audit
 metadata — verification matters because it was handed the same misleading
 "none" and would otherwise rubber-stamp the false negative as consistent.
 
-**AND IT IS STILL NOT ENOUGH — see below.**
+**That was not enough on its own — the model ignored it. See the next
+section for what actually fixed it.**
 
 ---
+
+## The false-absence defect — now fixed in code, not in a prompt
+
+The three prompt attempts recorded above did not work, and a fourth was not
+made. The decision was removed from the model instead.
+
+**Two states are now distinguished before synthesis runs at all:**
+
+| state | meaning | handling |
+|---|---|---|
+| query ran, zero rows | a fact about the college | unchanged — the model answers |
+| query could not run | a fact about our infrastructure | the model does not decide |
+
+**Case 1 — nothing else to answer from.** No LLM call happens. `_generate_stream`
+returns `UNAVAILABLE_MESSAGE` directly from code. A test asserts the synthesis
+function is never invoked.
+
+**Case 2 — retrieval worked.** The note is emitted as literal text *before*
+synthesis starts, and the model is never shown it and never asked to produce
+it. It is also handed `sql_result=None`, so there is no failed lookup in its
+prompt to write about.
+
+**Case 2 needed one more thing.** Withholding the SQL section was not enough:
+given no database data at all, the model still inferred absence from the
+question and wrote the same sentence anyway, directly beneath a note
+contradicting it. So `_strip_false_absence` removes such sentences after
+generation — deterministic code, scoped to this path only, and conservative: a
+sentence is dropped only if it matches an absence pattern **and contains no
+digit**, so a real finding like *"63 Lecturers do not have a recorded score"*
+survives.
+
+### The live result
+
+Signed in, Postgres stopped underneath the session, same question as before:
+
+```
+I couldn't retrieve that information right now due to a temporary system issue.
+Please try again shortly.
+
+However, for those departments that have data, the overall faculty development
+index averages 67.2 out of 100, with varying scores in digital capability and
+teaching quality. The most common competency level is "Advanced," and the most
+frequent assessed development need is "Moderate Development Need."
+```
+
+```
+STARTS WITH the note         : True
+false-absence phrases present: NONE
+route                        : RAG
+```
+
+The server log shows the filter doing its job:
+
+```
+removed 1 absence claim(s) from a degraded answer:
+  ['The college records do not cover the total number of faculty holding the
+    Lecturer rank across all departments.']
+```
+
+**19 tests** cover this, and they were verified to fail when the prepend is
+removed — 4 of them break, so they are load-bearing rather than decorative.
+
+### What this costs, stated plainly
+
+- **Degraded answers are buffered, not streamed.** Sentence removal needs whole
+  sentences and sentences span streamed chunks. Paid only during an outage, and
+  only after the note has already appeared, so nobody watches a blank screen.
+- **A removed sentence can leave a seam.** The live answer opens "However, for
+  those departments that have data" — a "However" whose preceding clause is
+  gone. Slightly odd, and much better than a false statement.
+- **The filter is a blunt instrument.** It deletes model prose on a pattern
+  match. It is confined to the one path where such a sentence is false by
+  construction, and the digit guard keeps data-bearing sentences. It would be
+  wrong to widen it.
+
+## The three smaller residuals — all fixed
+
+- **Audit during an outage.** The audit table is in the database, so the write
+  fails exactly when the system is still answering. There is no second durable
+  store, so the gap is now made VISIBLE instead of silent: the full record —
+  user, IP, route, question, answer prefix, latency — goes to the application
+  log at ERROR, which survives the database being down. Verified live:
+  `AUDIT WRITE FAILED (could not translate host name "postgres" ...)`.
+- **Route label.** An unavailable SQL result no longer counts as "SQL
+  happened", so a degraded answer is recorded as `RAG`. Verified live:
+  `route=RAG` where it previously said BOTH.
+- **403 to 503 on a Redis outage.** Django's cache session backend swallows
+  every exception in `load()` and treats an unreachable store as "not signed
+  in", which told users their account was the problem. `config/session_store.py`
+  lets connection errors propagate; `ResilientSessionMiddleware` stops the
+  response-phase session save from replacing that 503 with a 500. Verified
+  live: **503** with a plain sentence.
 
 ## What is still wrong
 
-### The model ignores the instruction anyway
-
-With the prompt now explicitly saying the lookup FAILED and that this does not
-mean the records are absent, `qwen2.5:7b` still opened its degraded answer with:
-
-> *"The college records don't cover the total number of faculty holding the
-> Lecturer rank across all departments."*
-
-Three attempts have not moved it:
-
-1. the existing `untrusted.py` wording (`does NOT mean the records are absent`)
-2. `_UnavailableSql`, which is what makes that wording fire at all
-3. an explicit template added to the synthesis system prompt telling it to write
-   *"I couldn't retrieve that right now"* and never *"the records don't cover"*
-
-The likely reason is that the style prompt hands the model an exact template for
-missing data — `"The college records don't cover X."` — and templates get
-copied. Giving it a competing template did not outrank the one it already knew.
-
-**The user-facing note IS appended**, so the answer is self-contradictory rather
-than purely false: it says the records do not cover the figure, and then says
-the records lookup was unavailable. That is better than the original defect and
-worse than correct.
-
-**The fix is probably not more prompt text.** The deterministic option is to put
-the "records lookup unavailable" note at the START of the answer instead of the
-end, so the caveat is read first. That means emitting it before synthesis
-begins, which restructures the streaming assembly path — not something to change
-without time to re-verify the whole streaming, caching and coalescing chain.
-Left undone deliberately.
-
-### Smaller residuals
-
-- **Route labelling.** With `_UnavailableSql` in place the effective route on a
-  degraded BOTH question is now reported as `BOTH` rather than `RAG`, because
-  the sentinel is not `None`. The answer is unaffected; the audit log's route
-  field is now less precise for that case.
-- **Nothing is audited during a database outage.** Questions are answered, but
-  `AuditLog.objects.create` fails and is swallowed by design. For a system whose
-  audit log is the accountability record, an outage is a blind spot.
-- **An existing session gets 403, not 503, when Redis is down.** Technically it
-  is "not authenticated", but it reads to the user as "your login is invalid"
-  rather than "the service is degraded". They then hit the login page, which
-  does say 503.
-
----
+- **The 3B verifier still times out on long degraded answers**, so they carry
+  "could not be fact-checked". Unchanged, and unrelated to this work.
+- **Redis remains a single point of failure for sessions.** Accepted trade,
+  measured above.
 
 ## Configuration added
 
@@ -246,4 +297,4 @@ runs one gunicorn worker with four threads, so four hung requests take the whole
 site down, including the cached answers and the status page that would explain
 why.
 
-**Tests: 124 backend (was 121), all passing.** `ruff` clean.
+**Tests: 146 backend, all passing.** `ruff` clean.

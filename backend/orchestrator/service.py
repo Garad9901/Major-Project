@@ -1,12 +1,12 @@
 # Copyright (c) 2026 Yash Garad. All rights reserved.
 
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 from common import llm_metrics
 from common.exceptions import (
     DatabaseUnavailable,
-    ServiceUnavailable,
     VectorStoreUnavailable,
 )
 from rag_agent.embedder import embed_text
@@ -45,26 +45,117 @@ RAG_DOWN_SQL_FALLBACK_NOTE = (
 )
 
 
+# ---------------------------------------------------------------------------
+# TWO STATES THAT LOOK ALIKE AND ARE NOT
+# ---------------------------------------------------------------------------
+# "the query ran and matched nothing"   -> a fact about the college
+# "the query could not run at all"      -> a fact about our infrastructure
+#
+# Only the first is something to tell a student about their college. Conflating
+# them produces the worst output this system can emit: a confident, specific
+# negative caused by a bug or an outage. During resilience testing, with
+# Postgres stopped, the model wrote
+#
+#     "The college records do not cover the total number of faculty holding
+#      the Lecturer rank"
+#
+# against a table holding 3,053 of them.
+#
+# THREE PROMPT-LEVEL ATTEMPTS FAILED TO STOP THIS, so the decision has been
+# taken away from the model. In the unavailable case the wording below is
+# returned from code and the model is either not called at all, or is called
+# only for the retrieval half and never gets to touch this text. There is no
+# instruction it can misread and no template it can prefer, because there is no
+# instruction — see _generate_stream.
+UNAVAILABLE_MESSAGE = (
+    "I couldn't retrieve that information right now due to a temporary system "
+    "issue. Please try again shortly."
+)
+
+
 class _UnavailableSql:
     """Stands in for a SQL result when the database could not be reached.
 
-    Duck-types sql_agent.service.SqlAgentResult well enough for the three
-    consumers that matter — synthesis_agent.untrusted.fence_sql_rows,
+    Duck-types sql_agent.service.SqlAgentResult well enough for the consumers
+    that matter — synthesis_agent.untrusted.fence_sql_rows,
     verification_agent.service._format_sql_section and orchestrator._sql_meta —
-    all of which branch on `.error` first and already carry carefully worded
-    text distinguishing "the lookup broke" from "there is nothing there".
+    all of which branch on `.error` first.
 
-    Reusing that path rather than writing new wording is deliberate: it is the
-    text that was argued over and tested after the original audit, and a second
-    near-copy would be a second thing to keep correct.
+    `unavailable` is what the orchestrator branches on. It is a separate flag
+    rather than an isinstance check so the distinction survives anything that
+    passes a different object with the same shape, and so the intent is legible
+    at the call site: `if _sql_unavailable(x)` says what it means.
+
+    NOTE that this object is still handed to VERIFICATION, which does need the
+    distinction spelled out in prose — a verifier told "no rows" would confirm
+    a false negative as consistent with its evidence. That is why the wording in
+    untrusted.py stays even though synthesis no longer relies on it.
     """
 
     rows = None
     columns = None
     generated_sql = None
+    unavailable = True
 
     def __init__(self, exc):
         self.error = f"the records database was unreachable ({exc})"
+
+
+def _sql_unavailable(sql_result):
+    """True when the lookup could not RUN, as opposed to running and finding
+    nothing. `sql_result is None` (route needed no SQL) is not unavailability,
+    and neither is an empty `.rows`."""
+    return bool(getattr(sql_result, "unavailable", False))
+
+
+# Sentences asserting that the college holds no such record. Matched ONLY on the
+# degraded path, where such a statement is known to be false — the lookup did
+# not run, so nothing was established about what the records contain.
+_ABSENCE_CLAIM_RE = re.compile(
+    r"\b("
+    r"records?\s+(?:do|does)\s*n[o']t\s+cover"
+    r"|records?\s+(?:do|does)\s+not\s+cover"
+    r"|(?:do|does)\s*n[o']t\s+(?:cover|contain|include|have)\s+"
+    r"|(?:do|does)\s+not\s+(?:cover|contain|include|have)\s+"
+    r"|there\s+(?:are|is)\s+no\s+"
+    r"|no\s+(?:records?|data|information)\s+(?:on|about|for|of)\b"
+    r"|(?:is|are)\s+not\s+(?:available|present|recorded|listed)\b"
+    r"|(?:isn|aren)'t\s+(?:available|in\s+the\s+records)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _strip_false_absence(text):
+    """Remove sentences claiming the records hold nothing. Returns (text, dropped).
+
+    USED ONLY WHEN THE LOOKUP WAS UNAVAILABLE. On that path such a sentence is
+    false by construction: the query never ran, so nothing at all was learned
+    about what the records contain. Everywhere else these phrasings are correct
+    and wanted, which is why this is not a global filter.
+
+    CONSERVATIVE ON PURPOSE. A sentence is dropped only if it matches AND
+    carries no digit. Numbers on this path come from retrieved passages and are
+    the substance of the answer; a sentence like "63 Lecturers do not have a
+    recorded score" is a real finding from real data and must survive. Deleting
+    model prose is a blunt instrument, so it is aimed narrowly.
+
+    If every sentence is dropped, the caller is left with the unavailability
+    note alone — which is the honest answer in that case anyway.
+    """
+    if not text:
+        return "", []
+    kept, dropped = [], []
+    for sentence in _SENTENCE_SPLIT_RE.split(text.strip()):
+        if not sentence.strip():
+            continue
+        if _ABSENCE_CLAIM_RE.search(sentence) and not re.search(r"\d", sentence):
+            dropped.append(sentence.strip())
+        else:
+            kept.append(sentence.strip())
+    return " ".join(kept), dropped
 
 
 def _resolve_route(question):
@@ -96,13 +187,15 @@ def _run_rag(question, profile):
 
 def _gather_sources(question, route, profile=None):
     """Fetch SQL and/or RAG data for the route, degrading gracefully when ONE
-    source is down. Returns (sql_result, rag_chunks, effective_route, notes).
+    source is down. Returns (sql_result, rag_chunks, effective_route, notes,
+    web_pages).
 
-    Raises a ServiceUnavailable only when no usable source remains (e.g. a
-    SQL-only question with the database down, or a descriptive question with
-    the vector store down and no useful SQL fallback). LLMUnavailable from the
-    embed/generate steps propagates untouched — if the LLM is down, the whole
-    request can't be served anyway.
+    An effective route of "NONE" means nothing usable came back and the caller
+    should answer with UNAVAILABLE_MESSAGE. VectorStoreUnavailable still
+    propagates from the RAG-only path, where a clean "descriptive search is
+    down" message is the better answer. LLMUnavailable from the embed/generate
+    steps propagates untouched — if the LLM is down, the whole request cannot be
+    served anyway.
     """
     needs_sql = route in ("SQL", "BOTH")
     needs_rag = route in ("RAG", "BOTH")
@@ -135,20 +228,9 @@ def _gather_sources(question, route, profile=None):
             except DatabaseUnavailable as exc:
                 logger.warning("SQL source down (route=BOTH), degrading to RAG-only: %s", exc)
                 notes.append(DB_DOWN_NOTE)
-                # Tell the model the lookup was UNAVAILABLE, not that there is
-                # no data. Leaving sql_result as None renders as "Database
-                # rows: none." in the prompt, and the model reads that as
-                # absence — measured during the Redis-sessions resilience test,
-                # with Postgres stopped:
-                #
-                #   "The college records do not cover the total number of
-                #    faculty holding the Lecturer rank"
-                #
-                # against a table holding 3,053 of them. That is the same
-                # confident-false-negative that was the worst finding of the
-                # original production audit, arriving by a different route: the
-                # careful wording in synthesis_agent/untrusted.py only fires
-                # when `.error` is set, and an outage never set it.
+                # Marked unavailable rather than left as None. None renders as
+                # "Database rows: none." to the verifier, which would then
+                # confirm a false negative as consistent with its evidence.
                 sql_result = _UnavailableSql(exc)
             try:
                 rag_chunks = f_rag.result()
@@ -156,17 +238,38 @@ def _gather_sources(question, route, profile=None):
                 logger.warning("RAG source down (route=BOTH), degrading to SQL-only: %s", exc)
                 notes.append(RAG_DOWN_NOTE)
 
-        if sql_result is None and rag_chunks is None:
-            raise ServiceUnavailable()  # both sources down — nothing to answer from
-        effective = "BOTH"
-        if sql_result is not None and rag_chunks is None:
+        # THE EFFECTIVE ROUTE IS WHAT ACTUALLY ANSWERED, not what was planned.
+        # It is written to the audit log, so labelling a question BOTH when the
+        # database was unreachable and only retrieval contributed makes the
+        # record wrong about how the answer was produced — which is precisely
+        # what an investigator reads it for. An unavailable SQL result is
+        # therefore not "SQL happened".
+        sql_answered = sql_result is not None and not _sql_unavailable(sql_result)
+        if sql_answered and rag_chunks is None:
             effective = "SQL"
-        elif rag_chunks is not None and sql_result is None:
+        elif rag_chunks is not None and not sql_answered:
             effective = "RAG"
+        elif not sql_answered and rag_chunks is None:
+            # Both sources gone. Not an exception: the caller turns this into
+            # the deterministic unavailability message, which is a better
+            # answer than a generic "service unavailable" error page.
+            effective = "NONE"
+        else:
+            effective = "BOTH"
         return sql_result, rag_chunks, effective, notes, []
 
-    if needs_sql:  # SQL-only — a DB outage here is fatal (no source to fall back on)
-        sql_result = _run_sql(question, profile)
+    if needs_sql:
+        # SQL-only. A database outage here used to raise ServiceUnavailable and
+        # surface as a generic error. It now returns the unavailable marker so
+        # the caller answers with UNAVAILABLE_MESSAGE — same information, but
+        # phrased as something that happened rather than as a failure page, and
+        # crucially never routed through the model.
+        try:
+            sql_result = _run_sql(question, profile)
+        except DatabaseUnavailable as exc:
+            logger.warning("SQL source down (route=SQL): %s", exc)
+            notes.append(DB_DOWN_NOTE)
+            return _UnavailableSql(exc), None, "NONE", notes, []
         return sql_result, None, "SQL", notes, []
 
     # RAG-only
@@ -192,10 +295,48 @@ def answer_question(question):
     with llm_slot(label=f"blocking q={question[:40]!r}"):
         route, reason = _resolve_route(question)
         sql_result, rag_chunks, effective_route, notes, web_pages = _gather_sources(question, route)
-        answer = synthesize_answer(
-            question, effective_route, sql_result=sql_result, rag_chunks=rag_chunks,
+
+        # Same two branches as the streaming path, kept in step deliberately:
+        # a caller using the blocking variant must not get a model-authored
+        # description of an outage that the streaming variant refuses to
+        # produce. See _generate_stream for the reasoning.
+        if _sql_unavailable(sql_result) and not rag_chunks and not web_pages:
+            logger.warning(
+                "records lookup unavailable and no retrieval fallback for %r — "
+                "returning the fixed message without calling the model", question[:60],
+            )
+            return {
+                "question": question,
+                "route": effective_route,
+                "route_reason": reason,
+                "answer": UNAVAILABLE_MESSAGE,
+                "degraded": True,
+                "notes": notes,
+                "sql": _sql_meta(sql_result),
+                "rag": None,
+                "web": None,
+                "verification": {"verification": "not_applicable"},
+            }
+
+        prefix = ""
+        synthesis_sql = sql_result
+        if _sql_unavailable(sql_result) and rag_chunks:
+            prefix = UNAVAILABLE_MESSAGE + "\n\n"
+            synthesis_sql = None
+            notes = [n for n in notes if n != DB_DOWN_NOTE]
+
+        generated = synthesize_answer(
+            question, effective_route, sql_result=synthesis_sql, rag_chunks=rag_chunks,
             web_pages=web_pages,
         )
+        if prefix:
+            generated, dropped = _strip_false_absence(generated)
+            if dropped:
+                logger.warning(
+                    "removed %d absence claim(s) from a degraded answer for %r: %r",
+                    len(dropped), question[:60], dropped,
+                )
+        answer = prefix + generated
         # Inside the slot: verification is more LLM work, so it must not run
         # concurrently with someone else's answer.
         answer, trailing, vmeta = verification.verify(
@@ -207,13 +348,14 @@ def answer_question(question):
     if notes:
         answer = answer + "\n\n" + "\n".join(notes)
 
-    logger.info("answered question=%r route=%s degraded=%s", question, effective_route, bool(notes))
+    degraded = bool(notes) or bool(prefix)
+    logger.info("answered question=%r route=%s degraded=%s", question, effective_route, degraded)
     return {
         "question": question,
         "route": effective_route,
         "route_reason": reason,
         "answer": answer,
-        "degraded": bool(notes),
+        "degraded": degraded,
         "notes": notes,
         "sql": _sql_meta(sql_result),
         "rag": _rag_meta(rag_chunks),
@@ -364,21 +506,107 @@ def _generate_stream(question, profile=None):
         }
         yield "stage", {"stage": "sources_ready", "route": effective_route}
 
+        # ------------------------------------------------------------------
+        # THE LOOKUP COULD NOT RUN, AND THERE IS NOTHING ELSE TO ANSWER FROM.
+        #
+        # No LLM call at all. The model is not asked, so it cannot decide to
+        # phrase this as "the college records do not cover X" — which is what
+        # it did, repeatedly, when it was asked. This is the whole point: the
+        # decision is removed rather than argued with.
+        # ------------------------------------------------------------------
+        if _sql_unavailable(sql_result) and not rag_chunks and not web_pages:
+            logger.warning(
+                "records lookup unavailable and no retrieval fallback for %r — "
+                "returning the fixed message without calling the model", question[:60],
+            )
+            profile.mark("synthesis_first_token")
+            yield "token", UNAVAILABLE_MESSAGE
+            profile.log(question)
+            _store_profile(question, effective_route, profile, {"verification": "skipped"})
+            yield "done", {
+                "answer": UNAVAILABLE_MESSAGE,
+                # Nothing was generated, so there is nothing to fact-check. Said
+                # explicitly rather than left absent, so this is not mistaken
+                # for a check that ran and passed.
+                "verification": {"verification": "not_applicable"},
+                "profile": profile.as_dict(),
+            }
+            return
+
+        # ------------------------------------------------------------------
+        # THE LOOKUP COULD NOT RUN, BUT RETRIEVAL DID.
+        #
+        # The note is emitted as literal text BEFORE synthesis starts, and the
+        # model is never shown it and never asked to produce it — so it cannot
+        # reword it, contradict it, or drop it. The model's only job is the
+        # retrieval half that follows, and it is handed no SQL section at all,
+        # so it has nothing to describe as absent.
+        # ------------------------------------------------------------------
         pieces = []
-        first_token_seen = False
+        degraded_prefix = _sql_unavailable(sql_result) and bool(rag_chunks)
+        if degraded_prefix:
+            prefix = UNAVAILABLE_MESSAGE + "\n\n"
+            pieces.append(prefix)
+            profile.mark("synthesis_first_token")
+            yield "token", prefix
+            # Withheld from synthesis on purpose: passing the unavailable
+            # marker would put "Database lookup FAILED" in the prompt and
+            # invite the model to write about it, which is the behaviour being
+            # removed. Verification still receives the real object below.
+            synthesis_sql = None
+            # The trailing note said the same thing in different words. Saying
+            # it twice — once leading, once trailing — reads as two separate
+            # problems rather than one, so the trailing copy goes.
+            notes = [n for n in notes if n != DB_DOWN_NOTE]
+        else:
+            synthesis_sql = sql_result
+
+        first_token_seen = degraded_prefix
         synthesis_started = profile.total_ms
         # Drained here so the streamed call's own timings are the only thing
         # add_stage() picks up, not whatever the sources stage left behind.
         llm_metrics.start()
-        for piece in synthesize_answer_stream(
-            question, effective_route, sql_result=sql_result, rag_chunks=rag_chunks,
+        stream = synthesize_answer_stream(
+            question, effective_route, sql_result=synthesis_sql, rag_chunks=rag_chunks,
             web_pages=web_pages,
-        ):
-            if not first_token_seen:
-                first_token_seen = True
-                profile.mark("synthesis_first_token")
-            pieces.append(piece)
-            yield "token", piece
+        )
+
+        if degraded_prefix:
+            # BUFFERED, NOT STREAMED, AND ONLY ON THIS PATH.
+            #
+            # Withholding the SQL section was not enough on its own. Measured:
+            # handed no database data at all, the model still inferred absence
+            # from the question and wrote
+            #
+            #   "The college records do not cover the total number of faculty
+            #    holding the Lecturer rank across all departments."
+            #
+            # while the note directly above it said the lookup had failed. The
+            # model cannot be talked out of this — three prompt attempts — so
+            # the sentence is removed after the fact instead. That needs whole
+            # sentences, and sentences span streamed chunks, so this branch
+            # buffers.
+            #
+            # The cost is that these answers do not appear token by token. It
+            # is paid only during an outage, and only after the note has
+            # already been shown, so the user is not left watching nothing.
+            generated = "".join(stream)
+            cleaned, dropped = _strip_false_absence(generated)
+            if dropped:
+                logger.warning(
+                    "removed %d absence claim(s) from a degraded answer for %r: %r",
+                    len(dropped), question[:60], dropped,
+                )
+            if cleaned:
+                pieces.append(cleaned)
+                yield "token", cleaned
+        else:
+            for piece in stream:
+                if not first_token_seen:
+                    first_token_seen = True
+                    profile.mark("synthesis_first_token")
+                pieces.append(piece)
+                yield "token", piece
         profile.add_stage("synthesis", synthesis_started)
 
         # VERIFICATION runs only now, because it needs a COMPLETE answer.
@@ -409,18 +637,27 @@ def _generate_stream(question, profile=None):
         # Cache only a clean, verified-or-unflagged answer. `degraded` covers the
         # case where a source was down: that answer describes a temporary outage
         # and must not be replayed once the source is back.
+        #
+        # `degraded_prefix` is part of this test and not merely `notes`. When the
+        # unavailability note is prepended, DB_DOWN_NOTE is removed from `notes`
+        # to avoid saying the same thing twice — which would have left `notes`
+        # empty and marked a degraded answer cacheable. An answer opening "I
+        # couldn't retrieve that information right now" would then have been
+        # replayed to everyone for the next half hour, including long after the
+        # database came back.
+        degraded = bool(notes) or degraded_prefix
         cache.store(
-            question, final_text, effective_route, embed_text, degraded=bool(notes)
+            question, final_text, effective_route, embed_text, degraded=degraded
         )
         # Hand the answer to anyone who coalesced behind this request. Done here
         # rather than only in the wrapper's `finally` so waiters get the real
         # text, not None.
-        if not notes:
+        if not degraded:
             cache.finish(question, final_text, effective_route)
 
         logger.info(
             "streamed answer question=%r route=%s degraded=%s verification=%s",
-            question, effective_route, bool(notes), vmeta.get("verification"),
+            question, effective_route, degraded, vmeta.get("verification"),
         )
         profile.log(question)
         _store_profile(question, effective_route, profile, vmeta)

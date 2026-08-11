@@ -116,7 +116,12 @@ CACHES = {
 # exposure than Postgres was — Redis does one simple thing, holds no queries,
 # and is not the component that falls over under a heavy report — but it is not
 # zero, which is why it runs with restart:always and AOF persistence.
-SESSION_ENGINE = "django.contrib.sessions.backends.cache"
+# Django's own cache backend, with ONE behaviour changed: it does not treat an
+# unreachable Redis as "this visitor is not signed in". The stock version
+# swallows every exception in load(), so a Redis outage returned 403 to a
+# signed-in user — telling them their account was the problem when the service
+# was. See config/session_store.py.
+SESSION_ENGINE = "config.session_store"
 SESSION_CACHE_ALIAS = "default"
 
 # Sessions in Redis resolve the COOKIE without Postgres. They do not resolve the
@@ -189,7 +194,11 @@ MIDDLEWARE = [
     # the way out (SESSION_SAVE_EVERY_REQUEST re-saving it). Placed underneath,
     # this would never see either.
     "config.middleware.SessionStoreUnavailableMiddleware",
-    "django.contrib.sessions.middleware.SessionMiddleware",
+    # Django's, subclassed so that failing to SAVE a session during an outage
+    # does not replace an already-correct 503 with a 500. See middleware.py —
+    # convert_exception_to_response wraps every middleware, so this cannot be
+    # handled from the one above.
+    "config.middleware.ResilientSessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",

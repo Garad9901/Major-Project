@@ -203,6 +203,19 @@ def login(request):
     # is now decided per-endpoint (see accounts/permissions.CanUseAssistant).
 
     django_login(request, user)
+
+    # SEED THE OUTAGE FALLBACK HERE, not on the first authenticated request.
+    #
+    # identity.remember() is otherwise called from CachedModelBackend.get_user
+    # and from CanUseAssistant — both of which only run on a LATER request. A
+    # user who signed in and then hit a database outage before making any other
+    # request therefore had nothing cached, and got a 403: measured, and it is
+    # exactly the sequence a person performs at the start of the working day.
+    #
+    # Login is the right place because it is the one moment the full user row
+    # and the profile are already in hand and the database is known healthy.
+    identity.remember(user, must_change_password=profile.must_change_password)
+
     logger.info("login username=%r ip=%s", user.username, _client_ip(request))
     return Response(_user_payload(user))
 

@@ -323,5 +323,30 @@ def _write_audit(*, username, client_ip, question, meta, answer, injection_flags
             injection_flags=", ".join(injection_flags),
             latency_ms=latency_ms,
         )
-    except Exception:
-        logger.exception("failed to write audit log for question=%r", question)
+    except Exception as exc:
+        # THE AUDIT TABLE IS IN THE DATABASE, so a database outage is exactly
+        # when this write fails — and exactly when the system is still answering
+        # questions, now that sessions live in Redis. Swallowing the failure
+        # silently left a blind spot in the record precisely during the period
+        # an investigator would most want to see: the answers given while
+        # something was broken.
+        #
+        # There is no second durable store to fall back on, and adding one to
+        # hold audit rows during an outage is a bigger change than it looks
+        # (ordering, replay, deduplication on recovery). What is cheap and worth
+        # doing is making the gap VISIBLE rather than invisible: the full record
+        # goes to the application log at ERROR, which is collected by Docker's
+        # json-file driver and survives the database being down.
+        #
+        # The answer text is deliberately truncated here. The log is a
+        # lower-integrity store than the audit table — wider read access, no
+        # retention policy of its own — so it records that a question was asked
+        # and by whom, not the whole institutional answer.
+        logger.error(
+            "AUDIT WRITE FAILED (%s) — recording to the application log instead. "
+            "username=%r ip=%s route=%s latency_ms=%s injection_flags=%s "
+            "question=%r answer_prefix=%r answer_chars=%d",
+            exc, username, client_ip, (meta or {}).get("route") or "?", latency_ms,
+            ", ".join(injection_flags) or "none",
+            question, (answer or "")[:200], len(answer or ""),
+        )
