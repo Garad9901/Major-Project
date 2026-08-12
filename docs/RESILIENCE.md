@@ -238,17 +238,49 @@ removed 1 absence claim(s) from a degraded answer:
     Lecturer rank across all departments.']
 ```
 
-**19 tests** cover this, and they were verified to fail when the prepend is
+**29 tests** cover this, and they were verified to fail when the prepend is
 removed — 4 of them break, so they are load-bearing rather than decorative.
+
+### The seam the removal created, and its repair
+
+Deleting a sentence stranded the connector that followed it. The live answer
+after the first fix opened:
+
+> **However,** for those departments that have data, the overall faculty
+> development index averages 67.2 out of 100...
+
+Every word true, and it reads as damaged — the clause the "However" pointed back
+at had just been removed. An answer that looks broken invites a reader to
+distrust the parts that are correct, so it is worth fixing rather than
+tolerating.
+
+`_strip_false_absence` is now position aware. A sentence immediately following a
+deletion loses a leading backwards-pointing connector — However, But,
+Additionally, That said, On the other hand, Nevertheless, Moreover, Conversely
+and the rest — and is re-capitalised. The same run of text, through the real
+function:
+
+```
+For those departments that have data, the overall faculty development index
+averages 67.2 out of 100, with varying scores in digital capability and
+teaching quality...
+```
+
+Three details that each needed their own test:
+
+- **Position matters.** A connector that did NOT follow a deletion is left
+  alone, because there it still has the clause it refers to. Stripping it would
+  damage good prose.
+- **The flag survives a run of deletions**, so two absence claims removed back
+  to back still repair the connector after them.
+- **"However." on its own** becomes nothing rather than a bare ".".
 
 ### What this costs, stated plainly
 
 - **Degraded answers are buffered, not streamed.** Sentence removal needs whole
   sentences and sentences span streamed chunks. Paid only during an outage, and
   only after the note has already appeared, so nobody watches a blank screen.
-- **A removed sentence can leave a seam.** The live answer opens "However, for
-  those departments that have data" — a "However" whose preceding clause is
-  gone. Slightly odd, and much better than a false statement.
+- **A removed sentence used to leave a seam.** Fixed — see above.
 - **The filter is a blunt instrument.** It deletes model prose on a pattern
   match. It is confined to the one path where such a sentence is false by
   construction, and the digit guard keeps data-bearing sentences. It would be

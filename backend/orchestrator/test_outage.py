@@ -333,3 +333,121 @@ class AbsenceClaimsAreStrippedOnTheDegradedPathTests(TestCase):
         self.assertTrue(answer.startswith(service.UNAVAILABLE_MESSAGE))
         self.assertNotIn("do not cover", answer.lower())
         self.assertIn("67.2", answer, "the useful retrieval content was lost")
+
+
+class DanglingConnectorsAreRepairedTests(TestCase):
+    """Removing a sentence must not leave the next one contrasting with nothing.
+
+    The live answer after the first fix opened:
+
+        "However, for those departments that have data, the overall faculty
+         development index averages 67.2 out of 100..."
+
+    Every word true, and it reads as broken — the clause the "However" refers
+    back to had just been deleted. An answer that looks damaged invites the
+    reader to distrust the parts that are correct, so the seam is repaired.
+    """
+
+    def _first_sentence(self, text):
+        kept, _dropped = service._strip_false_absence(text)
+        return kept
+
+    def test_however_the_exact_live_case(self):
+        out = self._first_sentence(
+            "The college records do not cover the total number of Lecturers. "
+            "However, for those departments that have data, the index averages "
+            "67.2 out of 100."
+        )
+        self.assertEqual(
+            out,
+            "For those departments that have data, the index averages 67.2 out of 100.",
+        )
+
+    def test_but(self):
+        out = self._first_sentence(
+            "The records do not cover that. But the average score is 67.2."
+        )
+        self.assertEqual(out, "The average score is 67.2.")
+
+    def test_additionally(self):
+        out = self._first_sentence(
+            "The records do not cover that. Additionally, teaching quality ranges "
+            "from 60 to 67."
+        )
+        self.assertEqual(out, "Teaching quality ranges from 60 to 67.")
+
+    def test_that_said(self):
+        """Multi-word, and must beat the shorter "That" alternative."""
+        out = self._first_sentence(
+            "The records do not cover that. That said, the most common level is Advanced."
+        )
+        self.assertEqual(out, "The most common level is Advanced.")
+
+    def test_on_the_other_hand(self):
+        """Longest alternative — must not be truncated to "On"."""
+        out = self._first_sentence(
+            "The records do not cover that. On the other hand, research output "
+            "averages 7.2."
+        )
+        self.assertEqual(out, "Research output averages 7.2.")
+
+    def test_nevertheless_followed_by_a_number(self):
+        """No capitalisation to do when the remainder starts with a digit."""
+        out = self._first_sentence(
+            "The records do not cover that. Nevertheless, 1,803 profiles were reviewed."
+        )
+        self.assertEqual(out, "1,803 profiles were reviewed.")
+
+    def test_a_connector_NOT_after_a_removal_is_left_alone(self):
+        """This is the whole reason the check is position aware.
+
+        Here the "However" still has the clause it refers back to, so removing
+        it would damage prose that was perfectly good.
+        """
+        text = "The index averages 67.2. However, digital scores lag at 60.9."
+        kept, dropped = service._strip_false_absence(text)
+        self.assertEqual(dropped, [])
+        self.assertEqual(kept, text)
+
+    def test_two_removals_in_a_row_still_strip_the_connector(self):
+        """The flag has to survive a run of deletions, not just one."""
+        out = self._first_sentence(
+            "The records do not cover that. There are no records of it. "
+            "However, the index averages 67.2."
+        )
+        self.assertEqual(out, "The index averages 67.2.")
+
+    def test_a_sentence_that_is_only_a_connector_disappears(self):
+        """Stripping "However" from "However." would otherwise leave a bare "."."""
+        kept, dropped = service._strip_false_absence(
+            "The records do not cover that. However."
+        )
+        self.assertEqual(kept, "")
+        self.assertEqual(len(dropped), 1)
+
+    def test_end_to_end_the_degraded_answer_reads_cleanly(self):
+        with mock.patch.object(
+            service, "_gather_sources",
+            return_value=(_unavailable(), [_Chunk()], "RAG", [service.DB_DOWN_NOTE], []),
+        ), mock.patch.object(
+            service, "synthesize_answer_stream",
+            lambda *a, **kw: iter([
+                "The college records do not cover the total number of Lecturers. ",
+                "However, the development index averages 67.2 out of 100.",
+            ]),
+        ), mock.patch.object(
+            service, "_resolve_route", return_value=("BOTH", "test")
+        ), mock.patch.object(
+            service.verification, "verify",
+            return_value=("ignored", "", {"verification": "off"}),
+        ):
+            events = list(service._generate_stream("How many Lecturers, and describe them?"))
+
+        answer = "".join(payload for kind, payload in events if kind == "token")
+        blank_line = chr(10) * 2
+        expected = (
+            service.UNAVAILABLE_MESSAGE
+            + blank_line
+            + "The development index averages 67.2 out of 100."
+        )
+        self.assertEqual(answer, expected)

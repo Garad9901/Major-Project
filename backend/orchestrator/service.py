@@ -127,6 +127,29 @@ _ABSENCE_CLAIM_RE = re.compile(
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
+# Words that point BACKWARDS at the sentence before them. When that sentence has
+# just been deleted they are left contrasting with nothing:
+#
+#     "However, for those departments that have data, the index averages 67.2."
+#
+# which reads as broken prose even though every remaining word is true. The
+# content was right and the seam was visible, which is its own kind of wrong —
+# an answer that looks damaged invites the reader to distrust the parts that are
+# correct.
+#
+# Longest first: "On the other hand" must be tried before "On", and "That said"
+# before "That". Python's alternation is first-match-wins, not longest-match.
+_DANGLING_CONNECTOR_RE = re.compile(
+    r"^("
+    r"On the other hand|On the contrary|That said|Having said that|Even so|"
+    r"By contrast|In contrast|By comparison|In addition|Additionally|"
+    r"Alternatively|Nevertheless|Nonetheless|Furthermore|Moreover|However|"
+    r"Meanwhile|Conversely|Instead|Although|Though|Whereas|Besides|"
+    r"But|Yet|Still|Also"
+    r")\b[\s,;:—–-]*",
+    re.IGNORECASE,
+)
+
 
 def _strip_false_absence(text):
     """Remove sentences claiming the records hold nothing. Returns (text, dropped).
@@ -142,20 +165,63 @@ def _strip_false_absence(text):
     recorded score" is a real finding from real data and must survive. Deleting
     model prose is a blunt instrument, so it is aimed narrowly.
 
+    THE SEAM IS REPAIRED TOO. Removing a sentence can strand the connector that
+    followed it, so a sentence immediately after a deletion loses a leading
+    "However" / "But" / "That said" and is re-capitalised. This is position
+    aware: the same word is left alone anywhere else, because there it still has
+    the clause it refers back to.
+
     If every sentence is dropped, the caller is left with the unavailability
     note alone — which is the honest answer in that case anyway.
     """
     if not text:
         return "", []
+
     kept, dropped = [], []
+    previous_was_dropped = False
+
     for sentence in _SENTENCE_SPLIT_RE.split(text.strip()):
-        if not sentence.strip():
+        sentence = sentence.strip()
+        if not sentence:
             continue
+
         if _ABSENCE_CLAIM_RE.search(sentence) and not re.search(r"\d", sentence):
-            dropped.append(sentence.strip())
-        else:
-            kept.append(sentence.strip())
+            dropped.append(sentence)
+            # Stays True across a run of deletions, so the connector is still
+            # stripped when two absence claims are removed back to back.
+            previous_was_dropped = True
+            continue
+
+        if previous_was_dropped:
+            sentence = _drop_leading_connector(sentence)
+            # An empty result means the sentence was ONLY a connector; skip it
+            # rather than emitting a stray fragment.
+            if not sentence:
+                continue
+        previous_was_dropped = False
+        kept.append(sentence)
+
     return " ".join(kept), dropped
+
+
+def _drop_leading_connector(sentence):
+    """Remove a backwards-pointing connector left dangling by a deletion.
+
+    Re-capitalises what follows, because "however, For those departments" and
+    "for those departments" are both wrong in different ways. Only the first
+    character is touched, so an acronym or a name further along is untouched,
+    and a sentence starting with a digit is left exactly as it is.
+    """
+    match = _DANGLING_CONNECTOR_RE.match(sentence)
+    if not match:
+        return sentence
+
+    remainder = sentence[match.end():].lstrip()
+    # "However." on its own leaves "." once the connector goes. Anything with no
+    # letter or digit left in it is punctuation debris, not a sentence.
+    if not re.search(r"[^\W_]", remainder):
+        return ""
+    return remainder[0].upper() + remainder[1:]
 
 
 def _resolve_route(question):
