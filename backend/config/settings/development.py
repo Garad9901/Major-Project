@@ -30,6 +30,27 @@ CSRF_COOKIE_SECURE = _cookie_secure
 CSRF_TRUSTED_ORIGINS = [
     f"https://{SERVER_HOST}",
     "https://localhost",
+    # The Vite dev server, reached directly over plain HTTP rather than through
+    # Caddy. Without these entries the SPA loads, the sign-in form renders, and
+    # the login POST is rejected with
+    #
+    #   CSRF Failed: Origin checking failed -
+    #   http://localhost:5173 does not match any trusted origins.
+    #
+    # which surfaces to the user as "Could not reach the sign-in service" and
+    # looks like wrong credentials. It is not: nothing is even logged as a
+    # failed login, because CSRF rejects the request before the view runs.
+    #
+    # WHY curl DID NOT CATCH THIS. Django only compares the Origin header when
+    # the browser sends one, and only checks Referer on HTTPS. A command-line
+    # client sending neither passes the check, so an API smoke test over plain
+    # HTTP can pass while every real browser fails.
+    #
+    # DEVELOPMENT ONLY. production.py builds its own list from SERVER_HOST over
+    # HTTPS and never includes a localhost or plain-HTTP entry.
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    f"http://{SERVER_HOST}:5173",
 ]
 
 # Wide open so a Vite dev server on any port can call the API from the browser.
