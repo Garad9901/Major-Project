@@ -27,7 +27,7 @@ class SqlAgentResult:
         return self.error is None
 
 
-def ask(question, execute=True):
+def ask(question, execute=True, history_block=""):
     """Natural language question -> validated+capped SQL -> (optionally) results.
 
     Every generated query is logged via the "sql_agent" logger *before* it's
@@ -44,7 +44,7 @@ def ask(question, execute=True):
     except psycopg2.OperationalError as exc:
         raise DatabaseUnavailable(f"database connection lost during schema read: {exc}") from exc
 
-    raw_output = llm_client.generate_sql(question, schema_text)
+    raw_output = llm_client.generate_sql(question, schema_text, history_block=history_block)
 
     try:
         capped_sql = guard.validate_and_cap(raw_output, schema.ALLOWED_TABLES)

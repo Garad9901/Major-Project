@@ -16,7 +16,7 @@ from sql_agent.service import ask as sql_ask
 from synthesis_agent.service import synthesize_answer, synthesize_answer_stream
 from web_agent.service import fetch_for_question
 
-from . import cache, verification
+from . import cache, conversation, verification
 from .concurrency import llm_slot
 from .profiling import Profile
 
@@ -224,11 +224,78 @@ def _drop_leading_connector(sentence):
     return remainder[0].upper() + remainder[1:]
 
 
-def _resolve_route(question):
+class Context:
+    """What the user was just talking about, resolved once per request.
+
+    Built in `prepare_context` before anything else runs, because three
+    different decisions depend on it and they must all see the same answer:
+    which route to take, what text to embed for retrieval, and what key to
+    cache under.
+
+    `asked` is what the user typed and is what gets shown back to them.
+    `question` is the resolved, standalone form and is what the pipeline runs
+    on. They are the same object for the overwhelming majority of questions.
+    """
+
+    __slots__ = ("asked", "question", "turns", "block", "resolved", "previous_route")
+
+    def __init__(self, asked, question=None, turns=(), block="", resolved=False,
+                 previous_route=None):
+        self.asked = asked
+        self.question = question or asked
+        self.turns = turns
+        self.block = block
+        self.resolved = resolved
+        self.previous_route = previous_route
+
+    @property
+    def is_followup(self):
+        return bool(self.turns)
+
+
+def prepare_context(question, history_turns=None, previous_route=None):
+    """Resolve a follow-up into a standalone question, once.
+
+    `history_turns` comes from the view, which is the only layer that knows
+    which conversation this belongs to. Passing it in rather than querying here
+    keeps the service free of the chat-history model and makes this callable
+    from tests and from the evaluation harness with no database at all.
+
+    Costs NOTHING for a self-contained question: `resolve` returns immediately
+    when the text does not look like a follow-up, so no history is formatted
+    and no LLM call is made. That is deliberate — see the latency note in
+    orchestrator/conversation.py.
+    """
+    if not history_turns:
+        return Context(question)
+
+    resolved_text, was_resolved = conversation.resolve(question, history_turns)
+    if not was_resolved:
+        # Not a follow-up, or the rewrite failed. Either way the pipeline runs
+        # on the original text and behaves exactly as it did before this
+        # feature existed.
+        return Context(question)
+
+    return Context(
+        asked=question,
+        question=resolved_text,
+        turns=history_turns,
+        block=conversation.as_prompt_block(history_turns),
+        resolved=True,
+        previous_route=previous_route,
+    )
+
+
+def _resolve_route(question, context=None):
     # classify() can raise LLMUnavailable (Ollama down) — we let that propagate,
     # since if the LLM is down synthesis can't run either. A *parse* failure
     # (route_result.error) is different: fall back to BOTH and carry on.
-    route_result = classify(question)
+    context = context or Context(question)
+    route_result = classify(
+        question,
+        history_block=context.block,
+        previous_route=context.previous_route,
+    )
     if route_result.error:
         logger.warning(
             "router failed question=%r error=%s — falling back to %s",
@@ -238,20 +305,32 @@ def _resolve_route(question):
     return route_result.route, route_result.reason
 
 
-def _run_sql(question, profile):
+def _run_sql(question, profile, history_block=""):
     # Timed INSIDE the worker thread, not around pool.submit(), so the recorded
     # interval is when the work actually ran rather than when it was queued.
     # That distinction is the whole point when proving the two branches overlap.
     with profile.stage("sql"):
-        return sql_ask(question, execute=True)
+        return sql_ask(question, execute=True, history_block=history_block)
 
 
 def _run_rag(question, profile):
+    """`question` is the RESOLVED form, and that is load-bearing, not incidental.
+
+    Retrieval EMBEDS this text. Embedding "name them" produces a vector for a
+    two-word phrase with no subject, and the nearest neighbours of that are
+    whatever else in the index happens to be short and vague — the retrieved
+    passages would be unrelated to what the user is actually asking about.
+
+    This is the one place in the pipeline that history-as-prompt-context cannot
+    fix, because nothing here reads a prompt. The only lever is what text gets
+    embedded, which is why the resolution step in conversation.py exists rather
+    than simply passing a transcript to each agent.
+    """
     with profile.stage("rag"):
         return retrieve(question, top_k=RAG_TOP_K)
 
 
-def _gather_sources(question, route, profile=None):
+def _gather_sources(question, route, profile=None, history_block=""):
     """Fetch SQL and/or RAG data for the route, degrading gracefully when ONE
     source is down. Returns (sql_result, rag_chunks, effective_route, notes,
     web_pages).
@@ -281,13 +360,13 @@ def _gather_sources(question, route, profile=None):
             return None, None, "WEB", notes, pages
         logger.info("WEB route produced no pages; falling back to SQL for %r", question[:60])
         notes.append(WEB_EMPTY_NOTE)
-        sql_result = _run_sql(question, profile)
+        sql_result = _run_sql(question, profile, history_block)
         return sql_result, None, "SQL", notes, []
 
     if needs_sql and needs_rag:
         # Independent I/O — run concurrently, but tolerate either one failing.
         with ThreadPoolExecutor(max_workers=2) as pool:
-            f_sql = pool.submit(_run_sql, question, profile)
+            f_sql = pool.submit(_run_sql, question, profile, history_block)
             f_rag = pool.submit(_run_rag, question, profile)
             try:
                 sql_result = f_sql.result()
@@ -331,7 +410,7 @@ def _gather_sources(question, route, profile=None):
         # phrased as something that happened rather than as a failure page, and
         # crucially never routed through the model.
         try:
-            sql_result = _run_sql(question, profile)
+            sql_result = _run_sql(question, profile, history_block)
         except DatabaseUnavailable as exc:
             logger.warning("SQL source down (route=SQL): %s", exc)
             notes.append(DB_DOWN_NOTE)
@@ -344,7 +423,7 @@ def _gather_sources(question, route, profile=None):
     except VectorStoreUnavailable:
         # Try SQL as a fallback; use it only if it actually found something.
         logger.warning("RAG source down (route=RAG), attempting SQL fallback")
-        fallback = _run_sql(question, profile)
+        fallback = _run_sql(question, profile, history_block)
         if fallback.rows:
             notes.append(RAG_DOWN_SQL_FALLBACK_NOTE)
             return fallback, None, "SQL", notes, []
@@ -352,15 +431,19 @@ def _gather_sources(question, route, profile=None):
     return None, rag_chunks, "RAG", notes, []
 
 
-def answer_question(question):
+def answer_question(question, context=None):
     """Full pipeline, blocking. Returns a dict with the final answer plus
     intermediate metadata. Degrades gracefully; raises ServiceUnavailable only
     when nothing can be answered."""
     # One slot for the whole pipeline. Raises AssistantBusy if the queue wait
     # expires, which the API layer turns into a "busy, try again" message.
     with llm_slot(label=f"blocking q={question[:40]!r}"):
-        route, reason = _resolve_route(question)
-        sql_result, rag_chunks, effective_route, notes, web_pages = _gather_sources(question, route)
+        context = context or Context(question)
+        question = context.question
+        route, reason = _resolve_route(question, context)
+        sql_result, rag_chunks, effective_route, notes, web_pages = _gather_sources(
+            question, route, history_block=context.block
+        )
 
         # Same two branches as the streaming path, kept in step deliberately:
         # a caller using the blocking variant must not get a model-authored
@@ -393,7 +476,7 @@ def answer_question(question):
 
         generated = synthesize_answer(
             question, effective_route, sql_result=synthesis_sql, rag_chunks=rag_chunks,
-            web_pages=web_pages,
+            web_pages=web_pages, history_block=context.block,
         )
         if prefix:
             generated, dropped = _strip_false_absence(generated)
@@ -430,7 +513,7 @@ def answer_question(question):
     }
 
 
-def answer_question_stream(question, bypass_cache=False):
+def answer_question_stream(question, bypass_cache=False, context=None):
     """Full pipeline, streaming. Yields ('meta', {...}), then ('token', str)
     per piece, then ('done', {...}). Degradation notes (if any) are streamed
     as trailing tokens so the user sees why the answer is limited. Raises
@@ -463,9 +546,28 @@ def answer_question_stream(question, bypass_cache=False):
     # critical path to the first token for every question, hit or miss.
     profile = Profile()
 
+    # RESOLVED ONCE, HERE, AND EVERYTHING DOWNSTREAM USES IT.
+    #
+    # The cache key, the route, the embedded retrieval text and every agent
+    # prompt must all agree on what the question actually means, or a follow-up
+    # is cached under one meaning and answered under another.
+    context = context or Context(question)
+    # THE CACHE IS KEYED ON THE RESOLVED FORM, NOT ON WHAT WAS TYPED.
+    #
+    # "name them" is not a question — it is a question shaped by whatever came
+    # before it. Keyed literally, two unrelated conversations that both end in
+    # "name them" collide, and the second user is served the first one's answer
+    # with complete confidence. The semantic cache makes that WORSE, not better:
+    # every bare follow-up embeds close to every other bare follow-up, because
+    # they share the little text they have.
+    #
+    # Keyed on "Name the 8 departments." the collision cannot happen: the key
+    # now carries the context that disambiguates it.
+    cache_key = context.question
+
     if bypass_cache:
         logger.info("cache bypassed (regenerate) for %r", question[:60])
-        yield from _generate_stream(question, profile)
+        yield from _generate_stream(question, profile, context)
         return
 
     # CACHE CHECK BEFORE THE SLOT, DELIBERATELY.
@@ -476,24 +578,24 @@ def answer_question_stream(question, bypass_cache=False):
     # and then be handed an answer that was sitting in memory the whole time.
     # Out here, a hit costs no slot and blocks nobody.
     with profile.stage("cache_lookup"):
-        hit = cache.lookup(question, embed_text)
+        hit = cache.lookup(cache_key, embed_text)
 
     # COALESCE. A plain cache does nothing for simultaneous identical questions:
     # they all look up before the first answer exists, and all miss. If someone
     # is already generating this exact question, wait for their result rather
     # than queuing for a second LLM slot to compute the same thing.
     if hit is None:
-        if cache.begin(question):
+        if cache.begin(cache_key):
             leader = True
         else:
             leader = False
             with profile.stage("coalesce_wait"):
-                waited = cache.await_result(question)
+                waited = cache.await_result(cache_key)
             if waited and waited[0]:
                 hit = (waited[0], waited[1], "coalesced")
             else:
                 # Leader failed or timed out — fall back to doing it ourselves.
-                leader = cache.begin(question)
+                leader = cache.begin(cache_key)
     else:
         leader = False
 
@@ -523,16 +625,16 @@ def answer_question_stream(question, bypass_cache=False):
         return
 
     try:
-        yield from _generate_stream(question, profile)
+        yield from _generate_stream(question, profile, context)
     finally:
         # Always release waiters, including on error or client disconnect.
         # _generate_stream publishes the real result via cache.finish() on
         # success; this is the safety net that stops followers hanging.
         if leader:
-            cache.finish(question)
+            cache.finish(cache_key)
 
 
-def _generate_stream(question, profile=None):
+def _generate_stream(question, profile=None, context=None):
     """The real pipeline. Separated so the coalescing wrapper above stays
     readable and so `finally` cleanup is unambiguous.
 
@@ -541,6 +643,14 @@ def _generate_stream(question, profile=None):
     would be invisible, and every reported total would be short by that much.
     """
     profile = profile or Profile()
+    context = context or Context(question)
+    # THE PIPELINE RUNS ON THE RESOLVED QUESTION, not on what was typed.
+    #
+    # `asked` is kept for logging and for the audit record — the compliance
+    # trail must show what the user actually wrote, not a machine's paraphrase
+    # of it. Everything that reasons about the question uses the resolved form.
+    asked = context.asked
+    question = context.question
     # Timed by bracketing the acquire rather than wrapping it in a stage(),
     # because llm_slot is itself a context manager whose body is the entire
     # pipeline — wrapping it would time the whole request and call it "waiting".
@@ -549,7 +659,7 @@ def _generate_stream(question, profile=None):
         profile.add_stage("slot_wait", wait_started)
         profile.mark("slot_acquired")
         with profile.stage("router"):
-            route, reason = _resolve_route(question)
+            route, reason = _resolve_route(question, context)
 
         # Emitted BEFORE the data stages, which are the slow part. The SPA can
         # say "looking up records" the moment routing is decided instead of
@@ -558,11 +668,17 @@ def _generate_stream(question, profile=None):
         yield "stage", {"stage": "routing_done", "route": route, "reason": reason}
 
         sql_result, rag_chunks, effective_route, notes, web_pages = _gather_sources(
-            question, route, profile
+            question, route, profile, history_block=context.block
         )
 
         yield "meta", {
-            "question": question,
+            # What the user typed, so the SPA echoes their own words back.
+            "question": asked,
+            # Present only when the two differ, so the interface can show what
+            # a follow-up was understood to mean. Silence would be wrong: a
+            # user whose "name them" was misread has no way to see why the
+            # answer is about the wrong thing.
+            "resolved_question": question if context.resolved else None,
             "route": effective_route,
             "route_reason": reason,
             "degraded": bool(notes),
@@ -634,7 +750,7 @@ def _generate_stream(question, profile=None):
         llm_metrics.start()
         stream = synthesize_answer_stream(
             question, effective_route, sql_result=synthesis_sql, rag_chunks=rag_chunks,
-            web_pages=web_pages,
+            web_pages=web_pages, history_block=context.block,
         )
 
         if degraded_prefix:

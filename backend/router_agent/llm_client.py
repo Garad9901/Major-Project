@@ -83,13 +83,20 @@ A: {"route": "BOTH", "reason": "Asks for an exact count (SQL) and a narrative ch
 """
 
 
-def classify_question(question):
+def classify_question(question, history_block=""):
+    """`history_block` is prepended to the user message, not the system prompt.
+
+    The system prompt is identical on every call and therefore sits in Ollama's
+    prefix cache — 86% of it is reused between requests (see docs/LATENCY.md).
+    Putting variable text in it would invalidate that cache for every question,
+    including the ones with no history at all.
+    """
     # Raises common.exceptions.LLMUnavailable if Ollama is down/slow.
     return ollama.chat(
         ROUTER_MODEL,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": question},
+            {"role": "user", "content": f"{history_block}{question}"},
         ],
         options={"temperature": 0, "num_predict": ROUTER_NUM_PREDICT},
         response_format="json",

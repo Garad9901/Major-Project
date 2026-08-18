@@ -64,11 +64,14 @@ def _combined_context(rag_chunks, web_pages):
     return "\n\n".join(parts)
 
 
-def synthesize_answer(question, route, sql_result=None, rag_chunks=None, web_pages=None):
+def synthesize_answer(question, route, sql_result=None, rag_chunks=None, web_pages=None,
+                      history_block=""):
     sql_section = _format_sql_section(sql_result)
     rag_section = _combined_context(rag_chunks, web_pages)
 
-    answer = llm_client.synthesize(question, route, sql_section, rag_section)
+    answer = llm_client.synthesize(
+        question, route, sql_section, rag_section, history_block=history_block
+    )
 
     logger.info(
         "question=%r route=%s sql_rows=%d rag_chunks=%d",
@@ -79,7 +82,8 @@ def synthesize_answer(question, route, sql_result=None, rag_chunks=None, web_pag
     return answer
 
 
-def synthesize_answer_stream(question, route, sql_result=None, rag_chunks=None, web_pages=None):
+def synthesize_answer_stream(question, route, sql_result=None, rag_chunks=None,
+                             web_pages=None, history_block=""):
     """Streaming variant of synthesize_answer: yields the answer in pieces as
     the model generates them."""
     sql_section = _format_sql_section(sql_result)
@@ -92,4 +96,6 @@ def synthesize_answer_stream(question, route, sql_result=None, rag_chunks=None, 
         len(rag_chunks) if rag_chunks else 0,
         len(web_pages) if web_pages else 0,
     )
-    yield from llm_client.synthesize_stream(question, route, sql_section, rag_section)
+    yield from llm_client.synthesize_stream(
+        question, route, sql_section, rag_section, history_block=history_block
+    )

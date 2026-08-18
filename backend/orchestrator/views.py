@@ -14,9 +14,10 @@ from accounts.throttling import AskRateThrottle
 from audit.models import AuditLog
 from common.exceptions import ServiceUnavailable
 
+from . import conversation as conversation_context
 from .models import Conversation, Message, title_from
 from .sanitize import QuestionRejected, sanitize_question
-from .service import answer_question_stream
+from .service import answer_question_stream, prepare_context as build_context
 
 logger = logging.getLogger("orchestrator")
 
@@ -101,8 +102,27 @@ def ask(request):
     # Chat history. Failing to record a conversation must never cost the user
     # their answer, so every persistence call here is best-effort — same rule as
     # the audit write below, for the same reason.
-    conversation = _get_or_create_conversation(request, question)
-    _add_message(conversation, "user", question)
+    convo = _get_or_create_conversation(request, question)
+
+    # READ THE HISTORY BEFORE WRITING THIS QUESTION INTO IT.
+    #
+    # Otherwise "name them" is in its own context and the model is asked to
+    # resolve a pronoun against a transcript whose last line is the pronoun.
+    history_turns = conversation_context.load(convo)
+    previous_route = _last_route(convo)
+
+    _add_message(convo, "user", question)
+
+    # Resolving is a small LLM call and only happens for something that looks
+    # like a follow-up — a self-contained question costs nothing extra. See
+    # orchestrator/conversation.py for the latency reasoning.
+    context = build_context(
+        question, history_turns=history_turns, previous_route=previous_route
+    )
+    if context.resolved:
+        logger.info(
+            "follow-up resolved for %s: %r -> %r", username, question, context.question
+        )
 
     def event_stream():
         meta = {}
@@ -112,13 +132,15 @@ def ask(request):
         # Emitted before anything else so the SPA can attach this exchange to a
         # conversation immediately — including a brand-new one, whose id it
         # cannot know until now.
-        if conversation is not None:
+        if convo is not None:
             yield _sse("conversation", {
-                "id": conversation.id,
-                "title": conversation.title,
+                "id": convo.id,
+                "title": convo.title,
             })
         try:
-            for kind, payload in answer_question_stream(question, bypass_cache=bypass_cache):
+            for kind, payload in answer_question_stream(
+                question, bypass_cache=bypass_cache, context=context
+            ):
                 if kind == "stage":
                     # Progress ping. Forwarded as its own SSE event so the SPA
                     # can show what the assistant is doing during the tens of
@@ -159,7 +181,7 @@ def ask(request):
             # Runs even when the client disconnects mid-stream (Django closes the
             # generator, which raises GeneratorExit through this finally), so a
             # partial answer is still saved rather than lost.
-            _add_message(conversation, "assistant", answer, route=(meta or {}).get("route") or "")
+            _add_message(convo, "assistant", answer, route=(meta or {}).get("route") or "")
 
     return _sse_stream(event_stream())
 
@@ -202,6 +224,32 @@ def _get_or_create_conversation(request, question):
         )
     except Exception:
         logger.exception("could not open a conversation for username=%r", request.user)
+        return None
+
+
+def _last_route(convo):
+    """The route the previous answer in this conversation took.
+
+    Used as the fallback route for a follow-up the router cannot classify —
+    "name them" carries no vocabulary for the rule tier to match, and the
+    generic default of BOTH would run a retrieval search for the word "them".
+    Whatever answered the previous turn is a far better guess.
+
+    Best-effort: returns None on any failure, which restores the generic
+    default.
+    """
+    if convo is None:
+        return None
+    try:
+        return (
+            Message.objects.filter(conversation=convo, role="assistant")
+            .exclude(route="")
+            .order_by("-created_at", "-id")
+            .values_list("route", flat=True)
+            .first()
+        )
+    except Exception:
+        logger.exception("could not read the previous route for conversation %s", convo.pk)
         return None
 
 

@@ -33,14 +33,21 @@ Schema:
 """
 
 
-def generate_sql(question, schema_text):
+def generate_sql(question, schema_text, history_block=""):
+    """`history_block` lets a follow-up resolve its own references.
+
+    It goes in the USER message, never the system prompt. The system prompt
+    carries the ~6 KB schema and is byte-identical on every call, which is why
+    Ollama's prefix cache reuses it; mixing per-question text into it would
+    throw that away on every request.
+    """
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(schema=schema_text)
     # Raises common.exceptions.LLMUnavailable if Ollama is down/slow.
     return ollama.chat(
         SQL_AGENT_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
+            {"role": "user", "content": f"{history_block}{question}"},
         ],
         options={"temperature": 0, "num_predict": SQL_NUM_PREDICT},
         label="sql_generate",

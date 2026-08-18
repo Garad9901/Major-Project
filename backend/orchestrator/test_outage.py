@@ -158,7 +158,8 @@ class DegradedAnswerLeadsWithTheNoteTests(TestCase):
         """It cannot describe as absent something it was never handed."""
         seen = {}
 
-        def _capture(question, route, sql_result=None, rag_chunks=None, web_pages=None):
+        def _capture(question, route, sql_result=None, rag_chunks=None, web_pages=None,
+                     history_block=""):
             seen["sql_result"] = sql_result
             yield "prose about the passages"
 
