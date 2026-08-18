@@ -303,3 +303,377 @@ SYNTHESIS_NUM_PREDICT=900
 
 `FAST_ROUTER=false` and `FAST_VERIFICATION=false` restore the previous behaviour
 exactly, which is the intended way to A/B this on real traffic.
+
+---
+
+# Second pass — 18 August 2026
+
+**Hardware:** unchanged (Intel Core Ultra 9 185H, 16 cores / 22 threads, 31.4 GB
+RAM, **no CUDA GPU**). Ollama 0.32.3.
+**Method:** the previous pass was benchmarked on 7 hand-picked questions. This
+one is measured against **163 real questions** recorded in
+`orchestrator.QueryProfile` (`manage.py latency_report`), plus controlled
+micro-benchmarks run directly against Ollama's `/api/chat` with the prefix cache
+deliberately defeated.
+
+## Read this first: the premise of this pass was wrong
+
+The brief for this work stated a median of **141.6 s**. That number is real but
+it is **not the median** — it is question #3 of the 7-question benchmark in the
+pass above, a RAG-route descriptive question.
+
+Measured over the last 163 questions actually asked:
+
+| | p50 | p95 | p99 |
+|---|---|---|---|
+| **End to end** | **28.2 s** | 197.2 s | 248.5 s |
+| **Time to first token** | 21.7 s | 141.5 s | 245.6 s |
+| **Time to readable answer** | **24.5 s** | 158.3 s | – |
+
+Real traffic is **126 SQL / 26 RAG / 9 BOTH / 2 WEB**, so the median question is
+a SQL count, not a descriptive essay. Optimising against 141.6 s would have been
+optimising against roughly the 90th percentile while calling it the middle.
+
+## Summary
+
+| | Before | After | |
+|---|---|---|---|
+| **Median end to end** | 28.2 s | 28.2 s | unchanged |
+| **Median time to readable** | 24.5 s | 24.5 s | unchanged |
+| **Prompt truncation risk** | **live, silent, security-relevant** | **closed** | — |
+
+**No latency change was shipped in this pass, because none of the candidate
+optimisations survived measurement.** What was shipped is a correctness fix that
+measurement turned up on the way: prompts were one long answer away from being
+silently truncated, and truncation removes the *front* of the prompt, which is
+where the prompt-injection defences live.
+
+---
+
+## The one real finding: silent prompt truncation (SECURITY)
+
+`num_ctx` was never set by any agent (`grep -rn num_ctx backend` returned
+nothing), so Ollama applied its own default. With no GPU that default is:
+
+```
+level=INFO source=routes.go:2054 msg="vram-based default context"
+      total_vram="0 B" default_num_ctx=4096
+```
+
+**4,096 tokens.** Measured largest single prompt across 300 recorded questions:
+
+| stage | prompt tokens p50 | p95 | **max** | headroom at max |
+|---|---|---|---|---|
+| **synthesis** | 1,779 | 2,972 | **3,365** | **18%** |
+| sql | 1,352 | 1,361 | 1,368 | 67% |
+| router | 1,029 | 1,046 | 1,050 | 74% |
+| verification | 523 | 1,681 | 2,100 | 49% |
+
+Nothing had truncated **yet** — 0 calls of 331 exceeded 4,096. But synthesis was
+already at 82% of the ceiling, and its prompt grows with the retrieved passages.
+
+**What truncation actually does, measured.** An ~11,000-token system prompt
+beginning with a canary, sent with `num_ctx=4096`:
+
+```
+prompt_eval_count reported: 2050        (the prompt was ~11,000 tokens)
+answer: "It seems there might be a repetition or misunderstanding in your
+         question. You mentioned 'secret canary token' but provided
+         information about the faculty develo..."
+```
+
+The model never saw the canary. **Ollama silently discards the front of the
+prompt** — and the front of every synthesis prompt is the system prompt,
+including the entire `# UNTRUSTED CONTENT` section that defends against the
+injection attack recorded in `synthesis_agent/llm_client.py`. A long enough set
+of retrieved passages would therefore have disarmed the injection defences
+without raising an error, logging anything, or changing how the answer looked.
+
+**Cost of fixing it: none, measured.**
+
+| num_ctx | prefill tok/s | generation tok/s |
+|---|---|---|
+| 4,096 | 29.6 | 7.85 |
+| **8,192** | **29.0** | **8.10** |
+
+(n=2 each, alternating order.) The difference is inside run-to-run noise.
+
+That first benchmark defeated the prefix cache, which is **not** what a real
+call looks like. Re-measured on the common path — the real ~1,400-token
+synthesis system prompt already warm, then a fresh per-question body, again
+alternating, n=3:
+
+| num_ctx | fresh-body prefill (median) | range |
+|---|---|---|
+| 4,096 | 140,182 ms | 140,092–143,739 |
+| **8,192** | **131,030 ms** | 113,973–133,459 |
+
+**0.93×** — if anything slightly faster, and the ranges do not overlap. Doubling
+the context window costs nothing on this deployment.
+
+`num_ctx=8192` is now set explicitly in `common/ollama.py` for every chat call.
+
+**One-off cost, worth knowing about.** Changing `num_ctx` makes Ollama reload
+the model at the new size, which discards the prefix cache. The first question
+after this change took **110.9 s** (synthesis prefill 68.4 s) because it paid
+full prefill on a cold cache. The next three were 10.1 s, 34.6 s and 32.4 s with
+correct answers (2,073 / 3,053 / 1,046), i.e. straight back to normal. Expect
+one slow question after any restart that changes this value.
+
+---
+
+## Measured and rejected
+
+### 1. Model swapping between agents — DISPROVEN
+
+`OLLAMA_MAX_LOADED_MODELS` is unset, and the pipeline uses three models
+(`nomic-embed-text`, `qwen2.5:3b`, `qwen2.5:7b`). The hypothesis was that Ollama
+was evicting and reloading one on every request.
+
+It is not. Querying `/api/ps` between calls:
+
+```
+=== resident at start === ['nomic-embed-text:latest']
+synthesis      ... resident=['qwen2.5:7b', 'nomic-embed-text:latest']
+router 3b      ... resident=['qwen2.5:3b', 'qwen2.5:7b', 'nomic-embed-text:latest']
+=== resident at end === ['qwen2.5:7b', 'qwen2.5:3b', 'nomic-embed-text:latest']
+```
+
+All three stay resident together. The comment in `docker-compose.yml` asserting
+this was correct. `load_duration` is ~250 ms on every warm call, which is
+bookkeeping, not a 4.7 GB reload — the genuine cold load is **16.4 s** for the
+7B and **11.0 s** for the 3B, and it happens once.
+
+**No change made.** Setting `OLLAMA_MAX_LOADED_MODELS` explicitly would pin an
+assumption that is already holding, at the cost of a knob that can later be set
+wrong.
+
+### 2. Prefix caching is already working, and is load-bearing
+
+Same synthesis-shaped prompt, three times, then interleaved with other models:
+
+| call | prompt tokens | prefill | rate |
+|---|---|---|---|
+| synthesis, cold | 1,933 | 72,478 ms | 27 tok/s |
+| synthesis, repeat | 1,933 | **229 ms** | **8,449 tok/s** |
+| synthesis, repeat | 1,933 | **175 ms** | 11,033 tok/s |
+| after a `nomic` embedding call | 1,933 | 279 ms | 6,940 tok/s |
+| after a `qwen2.5:3b` call | 1,933 | 251 ms | 7,691 tok/s |
+| after a *different* 7B system prompt | 1,933 | 495 ms | 3,903 tok/s |
+
+The cache survives interleaving with other models **and** with a different
+prompt on the same model. The message-ordering audit found nothing to fix: every
+`llm_client.py` already puts the stable system prompt first and the variable
+text last, and the two that carry conversation history (`router_agent`,
+`sql_agent`) already document why history goes in the *user* message rather than
+the system prompt.
+
+This also explains an apparent contradiction in the recorded data — synthesis
+appears to read at 117 tok/s while the SQL agent reads at 1,397 tok/s on the
+same model. Neither is a real rate. `prompt_eval_count` reports the **whole**
+prompt while `prompt_eval_duration` covers only the **uncached** part. The true
+figure is one number:
+
+> **Uncached prefill on this CPU is ~26–33 tok/s. Generation is ~7.4–8.2 tok/s.**
+
+At p50, synthesis reads 1,779 tokens in 15.1 s. At 29 tok/s that is **~380
+tokens actually evaluated** — the ~1,400-token system prompt is served from
+cache. The two numbers agree to within the noise.
+
+**No change made.** This is already optimal; there is nothing to reorder.
+
+### 3. Verification blocking the user — ALREADY FIXED, no work needed
+
+The brief asked for verification to be moved off the critical path so the user
+can read the answer while it runs. It already is, and has been since the pass
+above.
+
+`orchestrator/service.py` streams synthesis tokens to the client and only then
+emits `stage: verifying`; `frontend/src/components/Chat.jsx` renders the
+streamed text and shows "Checking the answer against the records…" beneath an
+answer that is already fully readable.
+
+Measured over 137 uncached answers:
+
+| | p50 | p95 |
+|---|---|---|
+| Time to readable answer (synthesis ends) | **24.5 s** | 158.3 s |
+| End to end (`done` event) | 30.0 s | 197.2 s |
+| **Verification tail, after readable** | **0.1 s** | 41.7 s |
+
+Verification is **0.2% of the p50 request**, because the no-LLM fast path takes
+81 of 137 answers. The 62.3 s figure in the brief is the RAG-route case, which
+is 26 of 163 real questions.
+
+**No change made.** Restructuring this would have rewritten a working feature to
+buy a median improvement of 0.1 s.
+
+### 4. Thread count — a 1.47× "win" that was measurement drift
+
+`num_thread` was never set. A sweep on an uncacheable ~2,080-token prompt
+suggested a large win:
+
+| threads | 4 | 6 | 8 | 11 | **14** | 16 | 22 (default) |
+|---|---|---|---|---|---|---|---|
+| prefill tok/s | 16.5 | 18.6 | 18.7 | 21.4 | **27.4** | 27.0 | 18.6 |
+
+14 threads looked 1.47× faster than the default. **It is not.** That sweep ran
+each configuration once, in sequence, so slow drift over the run was
+indistinguishable from the variable being tested. Re-run with the two
+configurations **alternating**, three times each:
+
+| threads | prefill tok/s (median, range) | generation tok/s |
+|---|---|---|
+| default (22) | 29.3 (28.7–29.7) | **8.16** |
+| 14 | **32.8** (30.1–33.1) | 7.80 |
+
+The real effect is **1.12× on prefill and −4% on generation**, worth roughly
+1.5 s of a 28 s request. Note also that the *default* configuration measured
+18.6 tok/s in the first sweep and 29.3 tok/s in the second — **the machine
+drifts by more than the effect being measured.**
+
+**Not shipped as a default.** `OLLAMA_NUM_THREAD` exists in `common/ollama.py`
+and defaults to `0`, meaning "leave it to Ollama". Set it to 14 to take the
+~1.12×; the evidence is three alternating pairs, which is thin.
+
+### 5. SQL/RAG parallelism, `num_predict` caps, flash attention, `q8_0` KV
+
+Unchanged from the pass above; all previously measured, none re-tested. Flash
+attention plus `q8_0` KV cache remains **rejected** — 1.76× worse on this
+CPU-only deployment.
+
+---
+
+## The synthesis model: your decision, with the data
+
+`SYNTHESIS_MODEL` is already a separate env knob. `VERIFICATION_MODEL` is
+**already `qwen2.5:3b`** and has been since the previous pass — that half of the
+brief's item 4(b) was done, and the notes in `orchestrator/verification.py`
+record why.
+
+So the only open question is synthesis. Both runs used
+`manage.py run_experiment --configs full` over the 10 ground-truth pairs in
+`experiments/fixtures/sample_qa.json`, scored with `experiments/similarity.py`.
+Everything else was held constant.
+
+### Raw model speed (micro-benchmark, prefix cache defeated, alternating, n=2)
+
+| | prefill tok/s | generation tok/s |
+|---|---|---|
+| `qwen2.5:7b` | 26.1 | 7.38 |
+| `qwen2.5:3b` | **55.2** | **12.64** |
+| | **2.12×** | **1.71×** |
+
+### End-to-end quality and latency
+
+| question | 7B sim | 3B sim | 7B | 3B |
+|---|---|---|---|---|
+| How many credits is the Operating Systems course worth? | 0.734 | 0.680 ✗ | 132.2 s | 41.2 s |
+| What does the Database Systems course cover? | 0.953 | 0.885 ✗ | 24.6 s | 19.7 s |
+| Which department offers Organic Chemistry? | 0.891 | 0.891 | 33.0 s | 20.4 s |
+| When was the English department established? | 0.722 | 0.733 | 18.5 s | 13.4 s |
+| Who teaches Machine Learning Fundamentals? | 0.768 | 0.912 ✓ | 60.6 s | 40.7 s |
+| Tuition fee for B.Tech Computer Science? | 0.896 | 0.880 | 35.6 s | 22.3 s |
+| Prerequisites for Machine Learning Fundamentals? | 0.792 | 0.818 | 101.6 s | 24.3 s |
+| When is the final exam for Database Systems? | 0.591 | 0.443 ✗ | 20.1 s | 13.2 s |
+| Topics covered in Linear Algebra? | 0.941 | 0.909 | 24.1 s | 28.9 s |
+| How long is the M.Tech Computer Science program? | 0.787 | **0.388** ✗ | 23.6 s | 15.7 s |
+| **mean similarity** | **0.807** | **0.754** | | |
+| **median similarity** | 0.790 | **0.849** | | |
+| **harness accuracy** | **70%** (7/10) | 60% (6/10) | | |
+| **mean latency** | **47.4 s** | **24.0 s** | | **1.98×** |
+
+✗ = 3B materially worse (>0.05), ✓ = materially better. **Worse on 4/10, better
+on 1/10, comparable on 5/10.**
+
+### Recommendation: keep `qwen2.5:7b`. Confidence: moderate.
+
+The trade is **1.98× faster for −0.053 mean similarity**, and on the face of it
+that looks like a good deal. Three things argue against taking it:
+
+1. **The median gets better while the tail gets much worse.** 3B's median
+   similarity is actually *higher* (0.849 vs 0.790). The mean falls because of
+   outliers — most starkly "How long is the M.Tech Computer Science program?",
+   0.787 → **0.388**. That question returned **zero SQL rows**, so it is a
+   "the records don't cover this" case, and those are exactly where this
+   system's worst historical defects have lived: the false-absence bug that
+   took four attempts to fix, and the invented "Dr. Jane Smith". A model that
+   is fine on average and bad on empty results is badly matched to this
+   pipeline.
+
+2. **Neither number is interactive.** 47 s and 24 s are both "go and do
+   something else" latencies. Halving a wait nobody is sitting through does not
+   change the product, so there is little to weigh against a quality risk.
+
+3. **n=10.** One question is ten accuracy points. 70% vs 60% is one question.
+   This sample cannot distinguish those with any confidence, which is why the
+   continuous similarity scores are reported alongside — and why the confidence
+   here is "moderate", not "high".
+
+**What would change my mind:** a larger fixture set (50+ pairs, weighted towards
+the faculty-development questions real users actually ask, since the current
+fixtures are all course/program questions) showing 3B holding up on the
+zero-row and no-data cases. If you want that, it is a ~2 hour run and I would
+want the fixtures reviewed first.
+
+**To try it yourself, no code change:** set `SYNTHESIS_MODEL=qwen2.5:3b` in
+`.env` and restart the backend. Everything above is reproducible with:
+
+```
+docker exec -e SYNTHESIS_MODEL=qwen2.5:3b backend \
+  python manage.py run_experiment --configs full --tag syn3b
+```
+
+---
+
+## Where the floor is
+
+**The remaining cost is physics, and the only real lever is hardware.** The
+numbers behind that claim:
+
+| | measured |
+|---|---|
+| Uncached prefill, `qwen2.5:7b` | **26–33 tok/s** |
+| Generation, `qwen2.5:7b` | **7.4–8.2 tok/s** |
+| Cold model load, 7B / 3B | 16.4 s / 11.0 s (once) |
+| Prefix-cache hit rate, synthesis system prompt | ~1,400 of ~1,780 tokens |
+
+A p50 SQL question spends **28.2 s**, and it decomposes almost entirely into
+those two rates:
+
+| | p50 | what it is |
+|---|---|---|
+| SQL agent | 3.7 s | one SELECT generated at 7.8 tok/s |
+| **Synthesis prefill** | **15.1 s** | **~380 uncached tokens at ~26 tok/s** |
+| Synthesis generation | ~3.0 s | ~16 tokens at 7.2 tok/s |
+| Verification | 0.05 s | the no-LLM fast path, 81 of 137 answers |
+| Everything else | ~1 s | cache lookup, routing, retrieval, plumbing |
+
+**The single largest cost in the system is synthesis prefill: 15.1 s, 54% of the
+median request, and it is ~380 tokens of prompt that cannot be cached.**
+
+Those ~380 tokens are the per-question part of the prompt: the question, the
+route, the SQL rows, the retrieved passages, and the ~170-token
+`_POST_CONTENT_REMINDER`. That reminder is *stable text* and would be free if it
+sat in the system prompt — but it exists precisely because it must be the
+**last** thing the model reads, and moving it re-opens the injection hole it was
+added to close (see `synthesis_agent/llm_client.py`). So roughly **6 s per
+question is a security control that structurally cannot be prefix-cached.** That
+is a real cost, honestly the most interesting remaining target, and not one I
+would touch without an injection test gating it.
+
+### What actually moves it
+
+| lever | effect | cost |
+|---|---|---|
+| **A 24 GB GPU** | generation 9 → 100–140 tok/s, prefill ~20× | money. *Projected from published 7B benchmarks, not measured — this machine has no GPU.* |
+| `SYNTHESIS_MODEL=qwen2.5:3b` | **1.98× measured** | −0.053 mean similarity, worse on empty-result questions |
+| Shorten `_POST_CONTENT_REMINDER` | ~6 s of the 28 s p50 is at stake | re-opens a proven injection vector unless gated by a test |
+| Fewer RAG chunks (`RAG_TOP_K=5`) | untested; ~600 tokens ≈ 20 s on RAG questions | untested quality cost |
+| `OLLAMA_NUM_THREAD=14` | 1.12×, ~1.5 s | thin evidence (n=3), machine-specific |
+
+**Nothing in software gets a descriptive question below about 90 s on this
+hardware, and nothing gets a simple count below about 20 s.** The honest summary
+is the same as the previous pass reached, now with better numbers behind it: the
+overhead has been removed, and what is left is a 7B model reading and writing
+tokens on a CPU.
