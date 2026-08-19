@@ -15,7 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# Both files are copied; only the lock is installed. See backend/Dockerfile
+# and the header of requirements.lock for why.
+COPY requirements.txt requirements.lock ./
 # Upgrade pip itself before installing anything — same fix, same reason, as
 # backend/Dockerfile.
 #
@@ -27,8 +29,10 @@ COPY requirements.txt .
 # survives — audit every image, not just the one serving traffic.
 #
 # Pinned rather than bare `--upgrade` so a rebuild is reproducible.
+# --require-hashes: a substituted artefact fails the build, and a dependency
+# added to requirements.txt without regenerating the lock fails it too.
 RUN pip install --no-cache-dir --upgrade "pip>=26.1.2" \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir --require-hashes -r requirements.lock
 
 
 # --- production ---------------------------------------------------------------

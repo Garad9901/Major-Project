@@ -18,7 +18,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# BOTH files are copied, but only the lock is installed.
+#
+# requirements.txt states intent with loose floors and is what a human edits;
+# requirements.lock is what gets installed, with an exact version and a SHA-256
+# for every artefact. Copying both keeps the pair visible inside the image, so
+# an operator debugging a running container can see what was asked for as well
+# as what was resolved.
+COPY requirements.txt requirements.lock ./
 # Upgrade pip itself before installing anything.
 #
 # pip-audit reported 6 known vulnerabilities in this image, and every one of
@@ -28,8 +35,15 @@ COPY requirements.txt .
 #
 # Pinned rather than bare `--upgrade` so a rebuild is reproducible and a future
 # pip release cannot change build behaviour without someone choosing it.
+#
+# --require-hashes is the point of the lockfile, not a decoration. Without it
+# pip would accept a package whose contents changed upstream under the same
+# version number; with it, a mismatch fails the build. It also refuses to
+# install ANY unpinned requirement, so a dependency added to requirements.txt
+# without regenerating the lock breaks the build instead of silently entering
+# the image unpinned — which is exactly the mistake this is here to catch.
 RUN pip install --no-cache-dir --upgrade "pip>=26.1.2" \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir --require-hashes -r requirements.lock
 
 EXPOSE 8000
 
