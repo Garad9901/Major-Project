@@ -237,15 +237,57 @@ seconds there. They are compensating for CPU-only inference, nothing else.
 
 ## Running the automated tests
 
-### Backend (75 tests)
+Two commands, one per half of the stack. Both must pass before a deploy.
+
+```bash
+docker compose exec -T backend  python manage.py test    # 191 tests, ~48s
+docker compose exec -T frontend npm test                 # 102 assertions, ~2s
+```
+
+### Backend (191 tests)
 
 ```bash
 docker compose exec -T backend python manage.py test
 ```
 
 Covers the SQL guard, the prompt-injection fencing, cross-user isolation, the
-login lockout, the web-fetch allowlist and the content sanitiser. Takes about
-30 seconds. Everything must pass before a deploy.
+login lockout, the web-fetch allowlist, the content sanitiser, conversation
+history handling, degraded-mode behaviour during an outage, and the Ollama
+context-window guards. Takes about 48 seconds.
+
+### Frontend (102 assertions)
+
+```bash
+docker compose exec -T frontend npm test
+```
+
+**These assertions are not new — the runner is.** They were written before the
+frontend had one: each file counted its own passes, printed a summary and set
+`process.exitCode`, and had to be run by hand with the per-file esbuild commands
+still documented below. Nothing in CI executed them, so roughly 22 KB of real
+assertions sat in the repository unrun.
+
+`npm test` now runs all three files under vitest:
+
+| file | assertions | what it protects |
+|---|---|---|
+| `__login_test__.jsx` | 40 | institute identity renders; error states stay distinct and calm; no "AI template" visual clichés creep back |
+| `__markdown_test__.jsx` | 45 | markdown becomes real elements with no raw punctuation left visible, and `<script>` / `<img onerror>` are never emitted as tags |
+| `__smoothtext_test__.jsx` | 14 | the streamed text shown is ALWAYS a prefix of the text received — never a character the server did not send |
+
+Plus one guard per file asserting the file recorded any assertions at all, so a
+module-body throw reports a failure rather than a serene green pass with zero
+tests.
+
+The assertions themselves were not rewritten. Each file's local `check()`
+bookkeeping was swapped for an import from `src/__testutils__/check.js`, and a
+thin wrapper in `src/__tests__/` turns each recorded result into a vitest test.
+Every assertion line is byte-identical to before, which is what makes the change
+reviewable. Verified by injecting a deliberately failing assertion and
+confirming the suite reports `1 failed | 102 passed`.
+
+The per-file esbuild commands below still work and are kept for debugging a
+single file in isolation.
 
 ### Frontend markdown rendering (36 assertions)
 

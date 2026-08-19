@@ -27,3 +27,7 @@ dist
 # sync_worker/test_embedding_pipeline.py out of the production image.
 src/__*__.jsx
 src/**/*.test.jsx
+# The shared test harness. src/__*__.jsx above only matches files directly
+# under src/, so this directory needs naming explicitly — the root
+# .dockerignore already excludes it and these two must not disagree.
+src/__testutils__/

@@ -36,12 +36,9 @@ WHERE department = 'Engineering' AND competency_level = 'Expert';
 
 const html = renderToStaticMarkup(<Markdown>{SAMPLE}</Markdown>);
 
-let pass = 0;
-let fail = 0;
-const check = (label, ok, detail = "") => {
-  if (ok) { pass++; console.log(`  [PASS] ${label}`); }
-  else { fail++; console.log(`  [FAIL] ${label}${detail ? " — " + detail : ""}`); }
-};
+// `check` now comes from the shared collector so a real runner can see these
+// assertions; every call site below is unchanged. See __testutils__/check.js.
+import { check } from "./__testutils__/check";
 
 console.log("\n--- elements actually produced ---");
 check("bold renders as <strong>", /<strong[^>]*>Computer Science<\/strong>/.test(html));
@@ -192,6 +189,3 @@ const EVIL_CODE = renderToStaticMarkup(
   <Markdown>{"```javascript\nconst x = \"<script>alert(1)</script>\";\n```"}</Markdown>
 );
 check("script inside a highlighted fence is escaped", !/<script/i.test(EVIL_CODE));
-
-console.log(`\n==== ${pass} passed, ${fail} failed ====`);
-if (fail > 0) process.exitCode = 1;

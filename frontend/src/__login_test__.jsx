@@ -33,12 +33,9 @@ globalThis.document = globalThis.document || {
   documentElement: { classList: { toggle() {} } },
 };
 
-let pass = 0;
-let fail = 0;
-const check = (label, ok, detail = "") => {
-  if (ok) { pass++; console.log(`  [PASS] ${label}`); }
-  else { fail++; console.log(`  [FAIL] ${label}${detail ? " — " + detail : ""}`); }
-};
+// `check` now comes from the shared collector so a real runner can see these
+// assertions; every call site below is unchanged. See __testutils__/check.js.
+import { check } from "./__testutils__/check";
 
 const html = renderToStaticMarkup(<Login onLoggedIn={() => {}} />);
 const visible = html.replace(/<[^>]+>/g, " ").replace(/&[a-z]+;|&#x?\d+;/gi, " ");
@@ -129,6 +126,3 @@ check("is labelled for screen readers", /aria-label=/.test(mark));
 check("initials skip filler words",
       initialsOf({ name: "Institute of Science and Technology" }) === "IST",
       initialsOf({ name: "Institute of Science and Technology" }));
-
-console.log(`\n==== ${pass} passed, ${fail} failed ====`);
-if (fail > 0) process.exitCode = 1;

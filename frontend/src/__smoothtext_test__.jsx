@@ -17,12 +17,9 @@
 import { renderHook } from "./__testutils__/renderHook";
 import useSmoothText from "./hooks/useSmoothText";
 
-let pass = 0;
-let fail = 0;
-const check = (label, ok, detail = "") => {
-  if (ok) { pass++; console.log(`  [PASS] ${label}`); }
-  else { fail++; console.log(`  [FAIL] ${label}${detail ? " — " + detail : ""}`); }
-};
+// `check` now comes from the shared collector so a real runner can see these
+// assertions; every call site below is unchanged. See __testutils__/check.js.
+import { check } from "./__testutils__/check";
 
 console.log("\n--- reveals text gradually, never all at once ---");
 {
@@ -133,6 +130,3 @@ console.log("\n--- incremental pushes behave like a real stream ---");
   check("assembles the full answer", h.current[0] === expected, JSON.stringify(h.current[0]));
   check("never showed a non-prefix mid-stream", violations === 0);
 }
-
-console.log(`\n==== ${pass} passed, ${fail} failed ====`);
-if (fail > 0) process.exitCode = 1;
