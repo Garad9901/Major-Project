@@ -45,7 +45,37 @@ Or copy the project directory across. Everything below runs from the project roo
 
 ---
 
-## Step 2 — Generate secrets
+## Step 2 — Run setup
+
+```
+sh scripts/setup.sh
+```
+
+**This is the recommended path and it replaces steps 2 and 3.** It checks
+prerequisites (docker, RAM, disk), asks for your institution's name, server
+address and IT support email, generates every secret, substitutes the address
+into the three placeholders, writes `config/institution.json`, and then
+validates the result and tells you what is still outstanding.
+
+It refuses to overwrite an existing `.env.production` or `config/institution.json`,
+prints no secret at any point, and does not start the stack — starting downloads
+~7.7 GB of models, which should be a deliberate command run when you are ready
+to wait.
+
+Non-interactive, for automated provisioning:
+
+```
+sh scripts/setup.sh --non-interactive     --name "Riverside Institute of Technology"     --host rag.riverside.edu     --email it-helpdesk@riverside.edu
+```
+
+For a local development machine, `sh scripts/setup.sh --dev` writes `.env`
+instead and turns off the production-only hardening that would make
+`http://localhost` unreachable.
+
+### Doing it by hand instead
+
+`setup.sh` calls this, and you can call it directly if you would rather set the
+values yourself:
 
 ```
 sh scripts/generate_secrets.sh
