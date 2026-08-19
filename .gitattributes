@@ -1,0 +1,67 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+
+# LINE ENDINGS ARE A DEPLOYMENT CONCERN HERE, NOT A STYLE ONE.
+#
+# This repository is developed on Windows (core.autocrlf=true) and runs inside
+# Linux containers. That combination works only for as long as every clone
+# happens to have the same local git config, which is not a property a buyer's
+# IT department can be expected to know about.
+#
+# Without this file the guarantee is per-machine. With it, it is per-repository:
+# the index stays LF and the checkout is normalised regardless of who cloned it
+# or how their git is configured.
+#
+# The concrete failure this prevents: a shell script committed with CRLF gets
+# copied into an image and the kernel reads the shebang as "/bin/sh\r", which
+# fails with the famously unhelpful
+#
+#     exec /app/entrypoint.sh: no such file or directory
+#
+# backend/entrypoint.sh is the container's entrypoint, so that is a container
+# that will not boot at all — on the buyer's hardware, not ours.
+
+# Normalise everything git detects as text to LF in the index.
+* text=auto eol=lf
+
+# Files that MUST be LF because something other than an editor reads them.
+*.sh        text eol=lf
+*.bash      text eol=lf
+Dockerfile  text eol=lf
+*.Dockerfile text eol=lf
+entrypoint.sh text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.conf      text eol=lf
+Caddyfile*  text eol=lf
+
+# Source and config: LF, explicitly, so the intent survives a future edit to
+# the glob above.
+*.py        text eol=lf
+*.js        text eol=lf
+*.jsx       text eol=lf
+*.json      text eol=lf
+*.css       text eol=lf
+*.html      text eol=lf
+*.md        text eol=lf
+*.sql       text eol=lf
+*.txt       text eol=lf
+.env.example text eol=lf
+
+# Binary: never touch these. A "text" conversion applied to an image or an
+# archive corrupts it silently, and the corruption only shows up when someone
+# opens the file rather than when it is committed.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.svg       text eol=lf
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+*.pdf       binary
+*.zip       binary
+*.gz        binary
+*.tar       binary
+*.dump      binary
+*.snapshot  binary
