@@ -271,6 +271,26 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       SERVER_HOST: ${SERVER_HOST:-localhost}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      # The one file a college fills in: name, logo, colours, contact address
+      # and the web-fetch allowlist. See config/institution.example.json.
+      INSTITUTION_CONFIG: /etc/college-assistant/institution.json
+      # Demo data is OPT-IN. A production install starts empty and is populated
+      # by the operator's own import; shipping 13,000 rows of invented faculty
+      # into a real deployment would be indefensible. Set true for an evaluation
+      # or a training environment.
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-false}
+    volumes:
+      # NOT read-only: first-run setup writes institution.json here, which is
+      # the whole point of having a setup step rather than a documented file to
+      # hand-edit. Mounted in the BASE file so production gets it too — the
+      # production image bakes in ./backend, and config/ is outside that build
+      # context, so without this mount a production container would fall back to
+      # the built-in defaults and quietly have no institution name.
+      # MOUNTED OUTSIDE /app, and that is not a style choice. The Django
+      # project package is itself called `config` (backend/config/settings/),
+      # so mounting the host's ./config at /app/config shadowed it and the
+      # backend died on start with "No module named 'config.settings'".
+      - ./config:/etc/college-assistant
     ports:
       # 127.0.0.1 only: reachable from the server itself for diagnostics, never
       # from the network. Deliberately kept in production too — it is not a

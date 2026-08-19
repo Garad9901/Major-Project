@@ -174,6 +174,8 @@ INSTALLED_APPS = [
     "corsheaders",
     "accounts",
     "health",
+    # Reads config/institution.json — the single file a college fills in.
+    "institution",
     "academics",
     "sql_agent",
     "rag_agent",

@@ -21,7 +21,8 @@ logger = logging.getLogger("router_agent")
 #
 # It is a route, not a capability grant. Choosing WEB only decides that the web
 # agent runs; WHICH page it fetches is settled by keyword matching against
-# web_agent/urls_allowlist.json, never by the model. See web_agent/allowlist.py.
+# config/institution.json (web_sources), never by the model. See
+# web_agent/allowlist.py.
 VALID_ROUTES = {"SQL", "RAG", "BOTH", "WEB"}
 
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)

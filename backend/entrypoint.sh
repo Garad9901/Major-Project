@@ -25,9 +25,21 @@ python manage.py setup_roles
 echo "[entrypoint] Ensuring bootstrap staff login exists..."
 python manage.py create_staff_user
 
-if [ "${SEED_DEMO_DATA:-true}" = "true" ]; then
-  echo "[entrypoint] Seeding demo data (only if the database is empty)..."
+# DEMO DATA IS OPT-IN, AND THE DEFAULT CHANGED.
+#
+# This used to default to true, which was right while this was one deployment
+# for one college and wrong the moment it became something a stranger installs.
+# A production install must start empty and be populated from the institution's
+# own records; seeding 13,000 rows of invented faculty into a real deployment
+# would put fabricated data in front of real students.
+#
+# Set SEED_DEMO_DATA=true for an evaluation, a demo or a training environment.
+# --if-empty still guards it, so it can never overwrite real data.
+if [ "${SEED_DEMO_DATA:-false}" = "true" ]; then
+  echo "[entrypoint] SEED_DEMO_DATA=true - seeding demo data (only if the database is empty)..."
   python manage.py seed_demo_data --if-empty
+else
+  echo "[entrypoint] Demo data disabled (SEED_DEMO_DATA=false). Import your own records - see DATA_IMPORT.md."
 fi
 
 if [ "$DJANGO_ENV" = "production" ]; then

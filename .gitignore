@@ -42,3 +42,8 @@ backups/
 # editor
 .vscode/
 .idea/
+
+# The institution config a college fills in. The .example.json is committed;
+# the real one holds their name, colours and URL allowlist and must not be
+# overwritten by an upgrade or captured in a commit.
+config/institution.json

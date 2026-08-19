@@ -36,6 +36,7 @@ from rest_framework.permissions import AllowAny
 
 from common import ollama
 from rag_agent import vector_store
+from institution import config as institution_config
 
 logger = logging.getLogger("health")
 
@@ -217,7 +218,7 @@ _PAGE = """<!doctype html>
    .desc,.sub,.ms,footer{{color:#999}}
  }}
 </style></head><body><main>
-<h1>College Assistant — system status</h1>
+<h1>{institution} — system status</h1>
 <p class="sub">{host} · checked {now} UTC · refreshes every 15s</p>
 <div class="banner {banner_class}">{banner}</div>
 <table>
@@ -261,6 +262,14 @@ def status_page(request):
 
     html = _PAGE.format(
         title="Status — All operational" if not down else f"Status — {len(down)} DOWN",
+        # Reads the configured institution rather than a baked-in name. Falls
+        # back to a neutral label rather than a placeholder institution: an
+        # operator seeing "Academic Information Service" knows nothing is
+        # configured, whereas a plausible wrong name tells them nothing.
+        institution=(
+            institution_config.get().get("institution", {}).get("name")
+            or "Academic Information Service"
+        ),
         host=request.get_host(),
         now=time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
         banner=banner,

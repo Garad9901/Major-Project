@@ -6,7 +6,7 @@ THE CENTRAL RULE
 The language model never supplies a URL. It is not asked to. It cannot be
 prompted into asking for one, because nothing in this module accepts a URL as
 input — selection happens by deterministic keyword matching against `topics` in
-urls_allowlist.json.
+the `web_sources` section of config/institution.json.
 
 That is a deliberate design choice rather than a filter. A "generate a URL, then
 validate it" design is only as good as the validator, and a validator that must
@@ -31,10 +31,26 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger("web_agent")
 
-ALLOWLIST_PATH = os.getenv(
-    "WEB_AGENT_ALLOWLIST",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "urls_allowlist.json"),
+# WHERE THE LIST LIVES, AND WHY IT MOVED.
+#
+# It used to be web_agent/urls_allowlist.json, one of three separate places a
+# new college had to edit (the others being frontend/src/institute.js and .env).
+# It is now a section of config/institution.json — the single file a college
+# fills in — so that deploying for a new institution is one file, not a hunt.
+#
+# NOTHING ABOUT THE SECURITY MODEL CHANGED. The same _validate() runs on the
+# same fields, the model still never sees this list and still never supplies a
+# URL, and selection is still deterministic keyword matching. Only the bytes'
+# location moved.
+#
+# The legacy path is still read when the new one has no web_sources section, so
+# an existing deployment keeps working across the upgrade without an edit.
+_CONFIG_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "config", "institution.json")
 )
+_LEGACY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "urls_allowlist.json")
+
+ALLOWLIST_PATH = os.getenv("WEB_AGENT_ALLOWLIST", os.getenv("INSTITUTION_CONFIG", _CONFIG_PATH))
 
 # Only these schemes are ever fetched. file:, ftp:, gopher: and data: are all
 # ways to turn a fetcher into something else entirely.
@@ -83,22 +99,29 @@ def load(force=False):
         if _entries is not None and not force:
             return _entries
 
-        try:
-            with open(ALLOWLIST_PATH, encoding="utf-8") as fh:
-                raw = json.load(fh)
-        except FileNotFoundError:
-            logger.warning("no allowlist at %s — the web agent is disabled", ALLOWLIST_PATH)
+        raw, source = _read_source()
+        if raw is None:
+            logger.warning(
+                "no allowlist at %s (or %s) — the web agent is disabled",
+                ALLOWLIST_PATH, _LEGACY_PATH,
+            )
             _entries = []
             return _entries
-        except json.JSONDecodeError as exc:
-            # Do NOT fall back to an empty list here: a typo would silently turn
-            # the feature off, and "no results" is indistinguishable from
-            # "misconfigured".
-            raise AllowlistError(f"{ALLOWLIST_PATH} is not valid JSON: {exc}") from exc
+
+        # Accepts both shapes: {"web_sources": {"urls": [...]}} in the unified
+        # config, and the legacy top-level {"urls": [...]}.
+        section = raw.get("web_sources")
+        entries = (section or {}).get("urls") if isinstance(section, dict) else None
+        if entries is None:
+            entries = raw.get("urls", [])
 
         seen = set()
         out = []
-        for entry in raw.get("urls", []):
+        for entry in entries:
+            # Documentation keys are ignored rather than validated; the config
+            # file carries _comment blocks for whoever opens it.
+            if not isinstance(entry, dict):
+                raise AllowlistError(f"allowlist entry must be an object, got {entry!r}")
             _validate(entry, seen)
             seen.add(entry["id"])
             if entry.get("enabled", True):
@@ -111,11 +134,29 @@ def load(force=False):
 
         _entries = out
         logger.info(
-            "web allowlist loaded: %d enabled entr%s (%s)",
-            len(out), "y" if len(out) == 1 else "ies",
+            "web allowlist loaded from %s: %d enabled entr%s (%s)",
+            source, len(out), "y" if len(out) == 1 else "ies",
             ", ".join(e["id"] for e in out) or "none",
         )
         return _entries
+
+
+def _read_source():
+    """Return (parsed_json, path) from the configured file, else the legacy one.
+
+    Returns (None, None) when neither exists. A JSON error still RAISES rather
+    than falling back: a typo must not silently disable the feature, because
+    "no results" and "misconfigured" would then look identical.
+    """
+    for path in (ALLOWLIST_PATH, _LEGACY_PATH):
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh), path
+        except json.JSONDecodeError as exc:
+            raise AllowlistError(f"{path} is not valid JSON: {exc}") from exc
+    return None, None
 
 
 def is_allowed(url):

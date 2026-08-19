@@ -1,0 +1,142 @@
+{
+  "_README": [
+    "THE ONE FILE A COLLEGE FILLS IN.",
+    "",
+    "Copy this to config/institution.json and edit it. Nothing else in the",
+    "repository needs to change to deploy for a new institution — not the React",
+    "bundle, not a Django setting, not a template.",
+    "",
+    "    cp config/institution.example.json config/institution.json",
+    "",
+    "config/institution.json is gitignored, so an upgrade never overwrites your",
+    "settings and your settings never end up in a commit.",
+    "",
+    "WHY THIS IS SERVED AT RUNTIME RATHER THAN COMPILED IN",
+    "The identity used to live in frontend/src/institute.js, which meant",
+    "rebranding required rebuilding a React bundle. A college's IT department",
+    "should not need a Node toolchain to change the name on the sign-in page. The",
+    "backend reads this file and serves it from /api/institution/; the frontend",
+    "fetches it at boot. Changing a value here needs a backend restart, not a",
+    "rebuild.",
+    "",
+    "WHAT IS DELIBERATELY NOT HERE",
+    "Secrets. Database passwords, the Django SECRET_KEY and the read-only role's",
+    "password live in .env, which has different handling and different backup",
+    "rules. This file is safe to read, to diff and to attach to a support ticket.",
+    "It is served UNAUTHENTICATED, because the sign-in screen has to render",
+    "before anyone has signed in — so never put anything sensitive in it."
+  ],
+
+  "institution": {
+    "_comment": [
+      "'name' is REQUIRED and ships empty on purpose. First-run setup refuses to",
+      "complete until it is set, so no deployment can accidentally go live still",
+      "calling itself by a placeholder."
+    ],
+
+    "name": "",
+
+    "short_name": "",
+
+    "descriptor": "Academic Information Service",
+
+    "footnote": "Authorised users only",
+
+    "initials": null,
+
+    "logo_url": null,
+
+    "contact_email": "",
+
+    "contact_url": "",
+
+    "_field_notes": {
+      "name": "Full registered name, as it should appear on the wordmark. Also seeds the generated identity pattern, so a different name gives a genuinely different pattern.",
+      "short_name": "Used where the full name will not fit — the browser tab, narrow screens. Falls back to 'name' when empty.",
+      "descriptor": "One factual line under the wordmark. What this system IS, not a slogan; marketing copy on an internal sign-in screen reads as filler.",
+      "footnote": "Small line at the foot of the identity panel. Set to \"\" to hide it.",
+      "initials": "Monogram letters. Derived from 'name' when null, which is right for most names. Override for cases like 'Indian Institute of Technology', where the conventional initials (IIT) are not simply the capitals.",
+      "logo_url": "Absolute URL or a path under the static root. Left null, the wordmark and monogram stand in — deliberately better than stretching a low-resolution crest.",
+      "contact_email": "Shown to users when something fails and they need a human. An unreachable address here is worse than none.",
+      "contact_url": "Optional support or IT helpdesk page."
+    }
+  },
+
+  "theme": {
+    "_comment": [
+      "Applied at runtime as CSS custom properties on :root.",
+      "",
+      "SCOPE, STATED HONESTLY: these three colours cover the sign-in screen and",
+      "the accent used through the application. The full palette in",
+      "frontend/tailwind.config.js remains a BUILD-time concern — Tailwind",
+      "generates utility classes ahead of time and cannot read a runtime value.",
+      "Changing the wider design system still means editing that file and",
+      "rebuilding. That is a real limit, not an oversight: making every shade",
+      "runtime-settable would mean abandoning Tailwind's static extraction, which",
+      "is what keeps the CSS bundle at 29 KB.",
+      "",
+      "Contrast is your responsibility. The shipped values clear WCAG AA against",
+      "their backgrounds; a light accent on white will not, and nothing here",
+      "checks that for you."
+    ],
+
+    "accent": "#10a37f",
+    "identity_ink": "#132A45",
+    "identity_highlight": "#C98A2E"
+  },
+
+  "web_sources": {
+    "_comment": [
+      "THE COMPLETE LIST OF URLs THIS SYSTEM MAY FETCH. Nothing else is",
+      "reachable.",
+      "",
+      "The language model NEVER sees this list and NEVER supplies a URL. It cannot",
+      "ask for a page that is not here, because it is not asked which page to get:",
+      "selection is done by deterministic keyword matching in web_agent/allowlist.py",
+      "against the 'topics' below. An LLM that generated URLs would be an open",
+      "proxy with extra steps.",
+      "",
+      "Consequences worth stating:",
+      "  * The system can never fetch a page nobody put in this file.",
+      "  * A prompt injection can never cause a fetch, because injected text is",
+      "    not consulted for URL selection.",
+      "  * Adding a source is a file edit and a restart — deliberate and",
+      "    reviewable, which is the point.",
+      "",
+      "FIELDS",
+      "  id       stable identifier, used in logs",
+      "  url      the EXACT absolute URL fetched. No wildcards, no patterns.",
+      "  label    shown to users as the source of the information",
+      "  topics   lowercase keywords; a question matching these selects this page",
+      "  enabled  false parks an entry without deleting it",
+      "",
+      "The two entries below are your real pages and ship DISABLED. Enable them",
+      "once the URLs are correct. There are deliberately no live sample entries:",
+      "a fresh install should not be able to reach the public internet until",
+      "someone has decided which pages it may read."
+    ],
+
+    "urls": [
+      {
+        "id": "academic-calendar",
+        "url": "https://www.example.edu/academic-calendar",
+        "label": "Academic Calendar",
+        "topics": [
+          "academic calendar", "term dates", "semester dates", "holidays",
+          "vacation", "last date", "registration deadline", "exam schedule dates"
+        ],
+        "enabled": false
+      },
+      {
+        "id": "admissions-notices",
+        "url": "https://www.example.edu/admissions/notices",
+        "label": "Admissions Notices",
+        "topics": [
+          "admission", "admissions", "notice", "circular", "announcement",
+          "application deadline", "prospectus"
+        ],
+        "enabled": false
+      }
+    ]
+  }
+}

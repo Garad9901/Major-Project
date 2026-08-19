@@ -6,6 +6,10 @@ from orchestrator.views import conversation_detail, conversation_truncate, conve
 
 urlpatterns = [
     path("api/health/", include("health.urls")),
+    # UNAUTHENTICATED: the sign-in screen renders before anyone has a
+    # session, and it shows the institution name, monogram and colours.
+    # See institution/views.py for what that constrains.
+    path("api/institution/", include("institution.urls")),
     path("api/auth/", include("accounts.urls")),
     path("api/ask/", include("orchestrator.urls")),
     # Chat history for the sidebar. Mounted here rather than under

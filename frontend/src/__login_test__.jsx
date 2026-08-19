@@ -16,7 +16,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import IdentityPattern from "./components/IdentityPattern";
 import InstituteMark from "./components/InstituteMark";
 import Login, { describeFailure } from "./components/Login";
-import { INSTITUTE, initialsOf, seedFrom } from "./institute";
+import { INSTITUTE, applyInstitution, initialsOf, seedFrom } from "./institute";
 
 // Browser globals the component reads during render (its useState initialiser
 // checks a saved theme, and the theme effect writes one back). Assigned in the
@@ -37,11 +37,30 @@ globalThis.document = globalThis.document || {
 // assertions; every call site below is unchanged. See __testutils__/check.js.
 import { check } from "./__testutils__/check";
 
+// The identity is loaded at RUNTIME now (see institute.js), and its defaults
+// deliberately name no institution. Applying a known one here does two jobs:
+// it exercises applyInstitution(), and it stops the name assertion below from
+// comparing against "" — which String.includes() satisfies unconditionally, so
+// the test would have gone green while asserting nothing at all.
+applyInstitution({
+  institution: {
+    name: "Riverside Institute of Technology",
+    descriptor: "Academic Information Service",
+    footnote: "Authorised users only",
+  },
+  configured: true,
+});
+
 const html = renderToStaticMarkup(<Login onLoggedIn={() => {}} />);
 const visible = html.replace(/<[^>]+>/g, " ").replace(/&[a-z]+;|&#x?\d+;/gi, " ");
 
 console.log("\n--- institute identity is actually present ---");
 check("wordmark shows the institute name", visible.includes(INSTITUTE.name));
+// Guards the guard: if a refactor ever empties the default name again, the
+// assertion above silently stops testing anything.
+check("...and that name is not the empty string", INSTITUTE.name.length > 0, INSTITUTE.name);
+check("runtime config actually reached the module",
+      INSTITUTE.name === "Riverside Institute of Technology", INSTITUTE.name);
 check("descriptor is shown", visible.includes(INSTITUTE.descriptor));
 check("monogram uses the derived initials", html.includes(`>${initialsOf()}<`));
 check("wordmark uses the display face", /font-display/.test(html));
