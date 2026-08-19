@@ -84,7 +84,7 @@ function EditIcon() {
 
 const ROUTE_LABEL = { SQL: "database", RAG: "documents", BOTH: "database + documents" };
 
-function Chat({ username, initialTheme, onLogout, onSessionExpired }) {
+function Chat({ username, initialTheme, onOpenAdmin, onLogout, onSessionExpired }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -471,6 +471,16 @@ function Chat({ username, initialTheme, onLogout, onSessionExpired }) {
             <span className="hidden text-xs text-neutral-500 sm:inline dark:text-neutral-400">
               {username}
             </span>
+            {/* Staff only, and undefined for everyone else — App decides. The
+                server refuses these routes to a non-staff account regardless. */}
+            {onOpenAdmin && (
+              <button
+                onClick={onOpenAdmin}
+                className="rounded-lg px-2.5 py-1.5 text-xs text-neutral-500 transition hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800"
+              >
+                Admin
+              </button>
+            )}
             <button
               onClick={onLogout}
               className="rounded-lg px-2.5 py-1.5 text-xs text-neutral-500 transition hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800"

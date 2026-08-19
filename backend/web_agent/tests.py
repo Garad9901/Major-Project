@@ -14,14 +14,45 @@ from .fetcher import FetchRefused, fetch
 
 
 class AllowlistTests(TestCase):
-    def test_allowlist_loads_and_is_non_empty(self):
+    """These build their own fixture rather than reading the shipped config.
+
+    They used to assert that the shipped allowlist had enabled entries, which
+    passed only because the file shipped with example.com and iana.org samples
+    switched ON. That was the bug: a fresh install could reach the public
+    internet before anyone had chosen which pages it may read. The samples are
+    gone, a fresh install now loads ZERO entries, and these tests were encoding
+    the old behaviour — so they assert the new default explicitly and construct
+    their own entries for everything else.
+    """
+
+    KNOWN = "https://www.example.edu/academic-calendar"
+
+    def setUp(self):
+        # Installed directly rather than through a temp file: this is exercising
+        # matching logic, not the loader, and the loader has its own tests.
+        allowlist._entries = [{
+            "id": "calendar",
+            "url": self.KNOWN,
+            "label": "Academic Calendar",
+            "topics": ["term dates", "holidays"],
+        }]
+        self.addCleanup(setattr, allowlist, "_entries", None)
+
+    def test_a_fresh_install_has_no_enabled_sources(self):
+        """The secure default. Nothing is fetchable until an operator says so."""
+        allowlist._entries = None
         entries = allowlist.load(force=True)
-        self.assertTrue(entries, "no enabled allowlist entries")
-        for e in entries:
-            self.assertTrue(e["url"].startswith(("http://", "https://")))
+        self.assertEqual(
+            entries, [],
+            "a fresh install must not ship with any fetchable URL enabled",
+        )
+
+    def test_loaded_entries_are_always_http_or_https(self):
+        for entry in allowlist.load():
+            self.assertTrue(entry["url"].startswith(("http://", "https://")))
 
     def test_exact_match_only(self):
-        known = allowlist.load()[0]["url"]
+        known = self.KNOWN
         self.assertTrue(allowlist.is_allowed(known))
         # Prefix / suffix tricks that a naive "startswith" or "endswith" check
         # would wave through.
@@ -31,10 +62,10 @@ class AllowlistTests(TestCase):
 
     def test_lookalike_domains_are_not_allowed(self):
         for bad in [
-            "https://example.com.attacker.test/",
-            "https://notexample.com/",
-            "https://example.com@attacker.test/",
-            "https://attacker.test/?u=https://example.com/",
+            "https://www.example.edu.attacker.test/",
+            "https://notexample.edu/",
+            "https://www.example.edu@attacker.test/",
+            "https://attacker.test/?u=https://www.example.edu/academic-calendar",
         ]:
             self.assertFalse(allowlist.is_allowed(bad), f"{bad} must not be allowed")
 

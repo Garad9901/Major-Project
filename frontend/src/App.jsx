@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import Admin from "./components/Admin";
 import ChangePassword from "./components/ChangePassword";
 import Chat from "./components/Chat";
 import Login from "./components/Login";
@@ -12,6 +13,10 @@ function App() {
   // must_change_password as well as on being signed in.
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Plain state rather than a router: this app has four screens reached by
+  // condition, not by URL, and adding react-router for one more would be a
+  // dependency bought for nothing.
+  const [showAdmin, setShowAdmin] = useState(false);
 
   // On load: make sure we have a CSRF cookie, then ask the server whether we
   // already have a valid session (rather than trusting any client-side state).
@@ -82,10 +87,19 @@ function App() {
     );
   }
 
+  // Offered only to staff — but the SERVER is the authority. Every /api/admin/
+  // route returns 403 to a non-staff account regardless of what the UI shows,
+  // so this check is a usability choice, not a security control.
+  if (showAdmin && user.is_staff) {
+    return <Admin onClose={() => setShowAdmin(false)} />;
+  }
+
   return (
     <Chat
       username={user.username}
       initialTheme={user.theme}
+      isStaff={user.is_staff}
+      onOpenAdmin={user.is_staff ? () => setShowAdmin(true) : undefined}
       onLogout={handleLogout}
       onSessionExpired={handleSessionExpired}
     />

@@ -47,3 +47,4 @@ backups/
 # the real one holds their name, colours and URL allowlist and must not be
 # overwritten by an upgrade or captured in a commit.
 config/institution.json
+config/institution.json.bak

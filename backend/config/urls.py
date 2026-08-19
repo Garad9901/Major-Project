@@ -10,6 +10,9 @@ urlpatterns = [
     # session, and it shows the institution name, monogram and colours.
     # See institution/views.py for what that constrains.
     path("api/institution/", include("institution.urls")),
+    # Staff only, every route. The allowlist route decides what the server
+    # will fetch, so an unauthenticated one would be an SSRF primitive.
+    path("api/admin/", include("administration.urls")),
     path("api/auth/", include("accounts.urls")),
     path("api/ask/", include("orchestrator.urls")),
     # Chat history for the sidebar. Mounted here rather than under

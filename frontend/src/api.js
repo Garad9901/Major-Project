@@ -245,3 +245,51 @@ function handleFrame(frame, { onConversation, onStage, onMeta, onToken, onDone, 
   else if (event === "done") onDone?.(payload.answer || "");
   else if (event === "error") onError?.(payload.error || "Unknown error");
 }
+
+// ---------------------------------------------------------------------------
+// Staff-only administration.
+//
+// Every one of these returns 403 for a non-staff user; the server is the
+// authority and the UI only decides whether to offer the link. See
+// backend/administration/views.py — the allowlist endpoint in particular
+// decides what the server will fetch, so it is guarded there, not here.
+// ---------------------------------------------------------------------------
+
+async function adminGet(path) {
+  const res = await fetch(`/api/admin/${path}`, { credentials: "include" });
+  if (!res.ok) throw new Error(await describeAdminFailure(res));
+  return res.json();
+}
+
+async function adminSend(path, method, body) {
+  const res = await fetch(`/api/admin/${path}`, {
+    method,
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...csrfHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await describeAdminFailure(res));
+  return res.json();
+}
+
+// The server's `detail` is written for the operator — it lists every problem
+// with an allowlist at once, for instance. Surfacing it beats replacing it with
+// a generic message.
+async function describeAdminFailure(res) {
+  if (res.status === 403) return "You need a staff account to do that.";
+  try {
+    const body = await res.json();
+    if (body?.detail) return body.detail;
+  } catch { /* not JSON */ }
+  return `That failed (${res.status}).`;
+}
+
+export const getAllowlist = () => adminGet("allowlist/");
+export const saveAllowlist = (urls) => adminSend("allowlist/", "PUT", { urls });
+export const getIdentity = () => adminGet("identity/");
+export const saveIdentity = (institution, theme) =>
+  adminSend("identity/", "PUT", { institution, theme });
+export const getAdminUsers = () => adminGet("users/");
+export const setUserActive = (username, isActive) =>
+  adminSend("users/active/", "POST", { username, is_active: isActive });
+export const getRuntimeSettings = () => adminGet("settings/");

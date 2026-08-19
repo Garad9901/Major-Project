@@ -176,6 +176,8 @@ INSTALLED_APPS = [
     "health",
     # Reads config/institution.json — the single file a college fills in.
     "institution",
+    # Staff-only endpoints for the settings an operator changes at run time.
+    "administration",
     "academics",
     "sql_agent",
     "rag_agent",
