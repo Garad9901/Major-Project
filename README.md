@@ -30,7 +30,29 @@ That's the only software you install by hand. Everything else is handled automat
 
 ---
 
-## Setup — step by step
+## Two paths, and you must pick the right one
+
+This page describes the **trial** path: get it running on one machine, with
+example passwords and an invented demo college to ask questions about.
+
+| | Trial (this page) | Real deployment |
+|---|---|---|
+| Start with | `cp .env.example .env` | `sh scripts/setup.sh` |
+| Passwords | published examples | generated, never printed |
+| Data | invented demo college | **empty** — you import your own |
+| `SEED_DEMO_DATA` | `true` | `false` |
+| Guide | this page | [DEPLOYMENT.md](DEPLOYMENT.md) |
+
+**If real students or staff will use this, stop and read
+[DEPLOYMENT.md](DEPLOYMENT.md) instead.** `.env.example` ships with passwords
+that are printed in this repository, so anything built from it is a trial
+system by definition — never a production one. `scripts/setup.sh` is the
+supported path for a real deployment: it generates every secret, asks for your
+institution's name and address, and turns the demo data off.
+
+---
+
+## Setup — step by step (trial)
 
 ### 1. Get the project files onto the server
 Copy the whole project folder (the one containing this README and the file named
@@ -42,7 +64,8 @@ Copy the whole project folder (the one containing this README and the file named
 - **Linux:** open a terminal and `cd` into the folder.
 
 ### 3. Create the settings file
-The project comes with an example settings file. Make your own copy of it by running:
+The project comes with an example settings file for trying things out. Make your
+own copy of it by running:
 
 - **Windows (PowerShell):**
   ```
@@ -53,8 +76,15 @@ The project comes with an example settings file. Make your own copy of it by run
   cp .env.example .env
   ```
 
-You can use the file as-is to try things out. **For real use, open `.env` in a text editor
-and change every password** (see "Security" below).
+You can use the file as-is to try things out — it switches on the demo college
+(8 departments, 7 faculty, a handful of courses and fees) so there is something
+to ask questions about immediately.
+
+**Do not turn this file into a production configuration by editing the
+passwords.** The supported path for a real deployment is `sh scripts/setup.sh`,
+which generates the secrets properly, never prints them, sets your institution's
+name and address, and leaves the database empty for your own records. See
+[DEPLOYMENT.md](DEPLOYMENT.md).
 
 ### 4. Start everything with one command
 ```

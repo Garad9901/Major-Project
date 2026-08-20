@@ -131,6 +131,42 @@ class AllowlistValidationTests(TestCase):
             self.assertEqual(response.status_code, 400)
             self.assertIn("credentials", response.json()["detail"])
 
+    def test_private_and_metadata_addresses_are_refused_on_WRITE(self):
+        """The fetcher would refuse these at fetch time, so they are inert. They
+        are still refused here, because config/institution.json is read by
+        operators as a statement of what this system may reach — and a line
+        saying 169.254.169.254 is a misleading artefact whether or not it works.
+        It also survives into backups, tickets and security reviews, where
+        nobody reading it knows the fetcher would refuse."""
+        targets = [
+            "http://169.254.169.254/latest/meta-data/",   # cloud metadata
+            "http://127.0.0.1/",                          # loopback
+            "http://[::1]/",                              # loopback, v6
+            "http://10.0.0.5/internal",                    # private
+            "http://192.168.1.1/",                        # private
+            "http://localhost:8000/admin",                # by name
+            "https://postgres:5432/",                     # container name
+            "https://qdrant.internal/x",                  # reserved suffix
+        ]
+        with _TempConfig({"institution": {"name": "R"}}):
+            for url in targets:
+                with self.subTest(url=url):
+                    response = self._put([{
+                        "id": "x", "url": url, "label": "L", "topics": ["x"],
+                    }])
+                    self.assertEqual(response.status_code, 400, url)
+
+    def test_a_real_public_url_is_still_accepted(self):
+        """The guard must not be so eager that it blocks the actual use case."""
+        with _TempConfig({"institution": {"name": "R"}}):
+            for url in ("https://www.example.edu/academic-calendar",
+                        "https://college.ac.in/notices"):
+                with self.subTest(url=url):
+                    response = self._put([{
+                        "id": "x", "url": url, "label": "L", "topics": ["x"],
+                    }])
+                    self.assertEqual(response.status_code, 200, url)
+
     def test_duplicate_ids_are_rejected(self):
         with _TempConfig({"institution": {"name": "R"}}):
             entry = {"id": "same", "url": "https://a.edu/", "label": "L", "topics": ["x"]}

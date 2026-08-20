@@ -34,30 +34,55 @@ from academics.models import (
 # ---------------------------------------------------------------------------
 
 DEPARTMENTS = [
+    # THESE ARE THE EIGHT DEPARTMENTS THE FACULTY DEVELOPMENT SURVEY USES, and
+    # that is the whole point of the list.
+    #
+    # It used to be Computer Science / Mathematics / Chemistry / English /
+    # Commerce, which overlapped with the survey on Computer Science ALONE. An
+    # evaluator who loaded both then got a system that answered "how many
+    # departments are there?" with 5 while every faculty count came from a
+    # different set of 8 — the assistant appearing to contradict itself, which
+    # is the single worst impression this software can make.
+    #
+    # The subject content below did not disappear; it was re-homed. Mathematics
+    # and Chemistry sit under Science, English under Arts and Humanities, and
+    # Commerce under Management, which is where a real institution would put
+    # them anyway.
     {"name": "Computer Science", "code": "CS", "established_year": 1986},
-    {"name": "Mathematics", "code": "MATH", "established_year": 1970},
-    {"name": "Chemistry", "code": "CHEM", "established_year": 1965},
-    {"name": "English", "code": "ENG", "established_year": 1960},
-    {"name": "Commerce", "code": "COM", "established_year": 1972},
+    {"name": "Science", "code": "SCI", "established_year": 1965},
+    {"name": "Arts and Humanities", "code": "AH", "established_year": 1960},
+    {"name": "Management", "code": "MGT", "established_year": 1972},
+    {"name": "Engineering", "code": "ENGR", "established_year": 1958},
+    {"name": "Education", "code": "EDU", "established_year": 1974},
+    {"name": "Social Science", "code": "SOC", "established_year": 1968},
+    {"name": "Medicine", "code": "MED", "established_year": 1981},
 ]
 
 FACULTY = [
     {"first": "Alan", "last": "Turing", "dept": "CS", "designation": "Professor"},
     {"first": "Grace", "last": "Hopper", "dept": "CS", "designation": "Associate Professor"},
-    {"first": "Emmy", "last": "Noether", "dept": "MATH", "designation": "Professor"},
-    {"first": "Srinivasa", "last": "Ramanujan", "dept": "MATH", "designation": "Assistant Professor"},
-    {"first": "Marie", "last": "Curie", "dept": "CHEM", "designation": "Professor"},
-    {"first": "Virginia", "last": "Woolf", "dept": "ENG", "designation": "Associate Professor"},
-    {"first": "Adam", "last": "Smith", "dept": "COM", "designation": "Professor"},
+    {"first": "Emmy", "last": "Noether", "dept": "SCI", "designation": "Professor"},
+    {"first": "Srinivasa", "last": "Ramanujan", "dept": "SCI", "designation": "Assistant Professor"},
+    {"first": "Marie", "last": "Curie", "dept": "SCI", "designation": "Professor"},
+    {"first": "Virginia", "last": "Woolf", "dept": "AH", "designation": "Associate Professor"},
+    {"first": "Adam", "last": "Smith", "dept": "MGT", "designation": "Professor"},
+    {"first": "Ada", "last": "Lovelace", "dept": "ENGR", "designation": "Professor"},
+    {"first": "Maria", "last": "Montessori", "dept": "EDU", "designation": "Associate Professor"},
+    {"first": "Emile", "last": "Durkheim", "dept": "SOC", "designation": "Professor"},
+    {"first": "Elizabeth", "last": "Blackwell", "dept": "MED", "designation": "Professor"},
 ]
 
 PROGRAMS = [
     {"name": "B.Tech Computer Science", "degree_level": "bachelor", "dept": "CS", "duration_years": 4},
     {"name": "M.Tech Computer Science", "degree_level": "master", "dept": "CS", "duration_years": 2},
-    {"name": "B.Sc Mathematics", "degree_level": "bachelor", "dept": "MATH", "duration_years": 3},
-    {"name": "B.Sc Chemistry", "degree_level": "bachelor", "dept": "CHEM", "duration_years": 3},
-    {"name": "B.A English", "degree_level": "bachelor", "dept": "ENG", "duration_years": 3},
-    {"name": "B.Com", "degree_level": "bachelor", "dept": "COM", "duration_years": 3},
+    {"name": "B.Sc Mathematics", "degree_level": "bachelor", "dept": "SCI", "duration_years": 3},
+    {"name": "B.Sc Chemistry", "degree_level": "bachelor", "dept": "SCI", "duration_years": 3},
+    {"name": "B.A English", "degree_level": "bachelor", "dept": "AH", "duration_years": 3},
+    {"name": "B.Com", "degree_level": "bachelor", "dept": "MGT", "duration_years": 3},
+    {"name": "B.Tech Civil Engineering", "degree_level": "bachelor", "dept": "ENGR", "duration_years": 4},
+    {"name": "B.Ed", "degree_level": "bachelor", "dept": "EDU", "duration_years": 2},
+    {"name": "B.A Sociology", "degree_level": "bachelor", "dept": "SOC", "duration_years": 3},
+    {"name": "MBBS", "degree_level": "bachelor", "dept": "MED", "duration_years": 5},
 ]
 
 COURSES = [
@@ -67,15 +92,15 @@ COURSES = [
      "description": "Relational algebra, SQL, normalization, transactions, and indexing."},
     {"code": "CS420", "title": "Operating Systems", "credits": 4, "dept": "CS",
      "description": "Processes, threads, scheduling, memory management, and file systems."},
-    {"code": "MATH201", "title": "Linear Algebra", "credits": 4, "dept": "MATH",
+    {"code": "MATH201", "title": "Linear Algebra", "credits": 4, "dept": "SCI",
      "description": "Vector spaces, matrices, eigenvalues, and linear transformations."},
-    {"code": "MATH110", "title": "Calculus I", "credits": 4, "dept": "MATH",
+    {"code": "MATH110", "title": "Calculus I", "credits": 4, "dept": "SCI",
      "description": "Limits, derivatives, integrals, and the fundamental theorem of calculus."},
-    {"code": "CHEM210", "title": "Organic Chemistry I", "credits": 4, "dept": "CHEM",
+    {"code": "CHEM210", "title": "Organic Chemistry I", "credits": 4, "dept": "SCI",
      "description": "Structure, nomenclature, and reactions of organic compounds."},
-    {"code": "ENG150", "title": "Shakespearean Literature", "credits": 3, "dept": "ENG",
+    {"code": "ENG150", "title": "Shakespearean Literature", "credits": 3, "dept": "AH",
      "description": "Close reading of major tragedies and comedies by William Shakespeare."},
-    {"code": "COM220", "title": "Financial Accounting", "credits": 3, "dept": "COM",
+    {"code": "COM220", "title": "Financial Accounting", "credits": 3, "dept": "MGT",
      "description": "Principles of recording, summarizing, and reporting financial transactions."},
 ]
 

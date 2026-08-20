@@ -202,7 +202,71 @@ def validate_web_sources(value):
                 problems.append(f"{where}: no hostname in {url!r}")
             if parsed.username or parsed.password:
                 problems.append(f"{where}: URL embeds credentials, which would be logged")
+            internal = _internal_target(parsed.hostname)
+            if internal:
+                problems.append(f"{where}: {internal}")
     return "; ".join(problems) if problems else None
+
+
+def _internal_target(hostname):
+    """Reject a host that is definitively not on the public internet.
+
+    WHY THIS EXISTS WHEN THE FETCHER ALREADY REFUSES THESE
+    web_agent.fetcher._is_public_ip resolves every hop and refuses any
+    non-public address, so a metadata URL sitting in this file is inert. But the
+    file is read by operators as a STATEMENT OF WHAT THIS SYSTEM MAY REACH, and
+    a line saying http://169.254.169.254/ is a misleading artefact whether or
+    not it works. It also survives into backups, support tickets and security
+    reviews, where nobody reading it knows the fetcher would refuse.
+
+    So: refuse to persist it. Defence in depth, and an honest file.
+
+    WHY THIS DOES NO DNS
+    Deliberate. A write-time DNS lookup is not a security control: a name that
+    resolves publicly now can resolve to 127.0.0.1 an hour later, which is
+    precisely the rebinding attack _is_public_ip exists to defeat by resolving
+    at FETCH time. Resolving here would buy a false sense of completeness, add a
+    network round trip to a form submission, and hang the request when a college
+    name server is slow. The checks below are the ones that can be decided from
+    the string alone, and the fetcher remains the authority.
+    """
+    import ipaddress
+
+    host = (hostname or "").strip().lower().strip("[]")
+    if not host:
+        return None
+
+    if host == "localhost" or host.endswith(".localhost"):
+        return "'localhost' is not reachable as a college web page"
+
+    # A literal address can be judged with no lookup at all.
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return (
+                f"{host} is a private, loopback or link-local address. The web "
+                f"fetcher only ever reads public pages; 169.254.169.254 in "
+                f"particular is the cloud metadata endpoint."
+            )
+        return None
+
+    # A single-label name — 'postgres', 'redis', 'backend' — is a container or
+    # LAN name, never a public page. Every real one has a dot in it.
+    if "." not in host:
+        return (
+            f"{host!r} has no domain part, so it can only be an internal "
+            f"service name. A published page always has a full domain."
+        )
+
+    # .internal and .local are reserved for exactly this and are not routable.
+    if host.endswith((".internal", ".local", ".localdomain")):
+        return f"{host} is an internal-only name and is not reachable publicly"
+
+    return None
 
 
 def validate_institution(value):

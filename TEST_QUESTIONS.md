@@ -12,7 +12,32 @@ question twice and the second one returns instantly from the 30-minute cache.
 
 ---
 
-## Start here — five questions that should just work
+## ⚠ Which dataset you have decides which questions work
+
+This file covers **two** sets of records, and a system may hold one or both.
+
+| | What it is | How it gets loaded |
+|---|---|---|
+| **The demo college** | 8 departments, 11 faculty, 10 programs, 8 courses, fees and timetables. Invented. | `SEED_DEMO_DATA=true` on first start |
+| **The faculty development survey** | 13,000 anonymised faculty records with ranks, scores and department profiles. | `load_faculty_dataset`, a manual command reading a CSV that is **not** in this repository |
+
+Sections below are marked **[demo]** or **[survey]**. If you ask a **[survey]**
+question on a system that has only the demo college, the correct answer is that
+the records do not cover it — *not* a number. That is the assistant working, not
+failing.
+
+**A note on a contradiction that used to be here.** Earlier versions of the demo
+college used five departments (Chemistry, Commerce, Computer Science, English,
+Mathematics) that overlapped the survey's eight on Computer Science alone. Load
+both and the assistant answered "how many departments are there?" with 5 while
+every faculty count came from a different set of 8 — it appeared to contradict
+itself. The demo college now uses **the same eight departments as the survey**,
+so both datasets agree. Mathematics and Chemistry sit under Science, English
+under Arts and Humanities, and Commerce under Management.
+
+---
+
+## [survey] Start here — five questions that should just work
 
 | Ask | Correct answer |
 |---|---|
@@ -21,12 +46,15 @@ question twice and the second one returns instantly from the 30-minute cache.
 | Which has more faculty, Computer Science or Management? | **Computer Science, 1,916 to 1,784** |
 | How many faculty hold the Lecturer rank? | **3,053** |
 | How many faculty are in the Medicine department? | **1,046** |
+| How many departments are there? | **8** — and the same 8 whichever dataset you ask about |
 
 ---
 
-## Counts you can check against the full table
+## [survey] Counts you can check against the full table
 
-The survey covers **13,000 faculty records** in total.
+The survey covers **13,000 faculty records** in total. Every figure in this
+section needs the survey dataset loaded; on a demo-only system the assistant
+should say the records do not cover it.
 
 **By department** — these eight are the only ones in the survey:
 
@@ -79,34 +107,7 @@ The survey covers **13,000 faculty records** in total.
 
 ---
 
-## ⚠ One question with a confusing answer — and it is not a bug
-
-> **"How many departments are there?"** → the assistant answers **5**
-
-That is correct for the question asked, and it will surprise you. There are two
-different lists of departments in this system:
-
-| Where | How many | Which |
-|---|---|---|
-| The `departments` catalogue | **5** | Chemistry, Commerce, Computer Science, English, Mathematics |
-| The faculty development survey | **8** | Engineering, Computer Science, Science, Management, Education, Arts and Humanities, Social Science, Medicine |
-
-They overlap on **Computer Science only**. "How many departments are there?"
-matches the small catalogue table; every faculty count above comes from the
-survey.
-
-**This is a data question for you, not a software fault** — the two datasets
-were loaded from different sources and were never reconciled. Worth deciding
-before pilot testers meet it, because it looks like the assistant contradicting
-itself.
-
-To ask about the eight, be explicit:
-
-> *"How many different departments appear in the faculty development records?"*
-
----
-
-## Descriptive questions (slower — up to 2.5 minutes)
+## [survey] Descriptive questions (slower — up to 2.5 minutes)
 
 These use the search index rather than the database, so expect a paragraph
 rather than a number.

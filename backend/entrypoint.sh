@@ -30,8 +30,17 @@ python manage.py create_staff_user
 # This used to default to true, which was right while this was one deployment
 # for one college and wrong the moment it became something a stranger installs.
 # A production install must start empty and be populated from the institution's
-# own records; seeding 13,000 rows of invented faculty into a real deployment
-# would put fabricated data in front of real students.
+# own records; seeding invented departments, staff and fees into a real
+# deployment would put fabricated data in front of real students.
+#
+# WHAT THIS ACTUALLY SEEDS, since an earlier version of this comment got it
+# wrong: seed_demo_data creates a small invented college — 8 departments,
+# 7 faculty, 10 programs, 8 courses, 4 rooms, and the offerings, exams and fee
+# rows that hang off them. Low hundreds of rows in total.
+#
+# It does NOT load the 13,000-row faculty development survey. That is a separate
+# manual command (load_faculty_dataset) reading a CSV that is not in this
+# repository and must be copied in deliberately — see RUNBOOK.md.
 #
 # Set SEED_DEMO_DATA=true for an evaluation, a demo or a training environment.
 # --if-empty still guards it, so it can never overwrite real data.
