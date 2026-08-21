@@ -208,6 +208,28 @@ GUNICORN_TIMEOUT=300
 # seconds there.
 OLLAMA_READ_TIMEOUT=240
 
+# THREAD COUNT. MUST AGREE WITH OLLAMA_CPU_LIMIT, AND THIS IS NOT A TUNING KNOB.
+#
+# A docker CPU limit is a QUOTA, not a core count. docker-compose.prod.yml caps
+# ollama at OLLAMA_CPU_LIMIT (default 4.0), but `nproc` inside that container
+# still reports every core on the host — 22 on the reference machine. So
+# llama.cpp happily spawns 22 threads to share 4 CPUs' worth of quota, and they
+# spend their time preempting each other.
+#
+# Measured on the production stack, same request, only this value changed:
+#
+#     num_thread=4     19.3 s wall,  3.73 tok/s
+#     default (22)    201.9 s wall,  0.11 tok/s     <- 34x slower
+#
+# At the default EVERY request exceeded OLLAMA_READ_TIMEOUT and users got
+# "The AI service is temporarily unavailable". Nothing was broken; the model was
+# simply thrashing. This was invisible in development, which has no CPU limit at
+# all and where the same setting is worth about 1.12x (docs/LATENCY.md, 18 Aug).
+#
+# If you raise OLLAMA_CPU_LIMIT, raise this to match. If you lower it, lower
+# this. They must agree.
+OLLAMA_NUM_THREAD=4
+
 # The model used for the fact-checking pass ONLY.
 #
 # Verification re-reads the question, the whole answer AND all the retrieved

@@ -181,7 +181,30 @@ services:
       # The caddy image does ship wget. --no-check-certificate because the cert
       # is self-signed by Caddy's internal CA; this probe only asks "is the
       # proxy answering", not "is the certificate trusted".
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--no-check-certificate", "--spider", "https://127.0.0.1/api/health/live/"]
+      # PROBES CADDY'S ADMIN ENDPOINT, NOT ITS PUBLIC SITE, AND THAT IS THE POINT.
+      #
+      # This used to be an HTTPS request to https://127.0.0.1/api/health/live/.
+      # It failed 100% of the time, on a Caddy that was serving pages perfectly:
+      #
+      #   SSL routines:ssl3_read_bytes:tlsv1 alert internal error (alert 80)
+      #
+      # The site block is keyed on $SERVER_HOST, so a request made to the bare IP
+      # sends no matching SNI and Caddy refuses the handshake. The container was
+      # therefore permanently "unhealthy" while working — which both trains an
+      # operator to ignore health status and, worse, would stop anything with
+      # `depends_on: caddy: condition: service_healthy` from ever starting.
+      #
+      # Probing the public site from inside the container also cannot be made
+      # portable: on a real deployment SERVER_HOST is a public DNS name that may
+      # not resolve, or may not route back, from within the container.
+      #
+      # The admin endpoint answers the question a CONTAINER healthcheck is
+      # actually asking — "is this process alive and serving its config?" —
+      # over plain HTTP on loopback, with no TLS, no SNI and no site matching.
+      # It is bound to localhost only (see Caddy's default admin listener), so
+      # this is not a network exposure. Whether the SITE is correct is what
+      # scripts/verify_deployment.sh checks, from outside, where it belongs.
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:2019/config/"]
       interval: 15s
       timeout: 5s
       retries: 5

@@ -177,6 +177,28 @@ else
 	fi
 fi
 
+# Ollama thread count vs its CPU quota.
+#
+# A mismatch here does not fail visibly — it makes every answer time out while
+# the stack reports itself perfectly healthy, which is how it survived until a
+# production request was actually served. See docs/LATENCY.md, 21 Aug 2026.
+OLLAMA_CPUS="$(docker inspect majorproject3-ollama-1 --format '{{.HostConfig.NanoCpus}}' 2>/dev/null || echo 0)"
+if [ "${OLLAMA_CPUS:-0}" -gt 0 ] 2>/dev/null; then
+	CPU_COUNT=$(( OLLAMA_CPUS / 1000000000 ))
+	# Read the EFFECTIVE value out of the running backend, not out of a file.
+	# The file is what someone wrote; this is what the process actually has.
+	NT="$(be sh -c 'echo "$OLLAMA_NUM_THREAD"' 2>/dev/null | tr -d '\r ')"
+	if [ -z "$NT" ] || [ "$NT" = "0" ]; then
+		red "ollama is capped at ${CPU_COUNT} CPUs but OLLAMA_NUM_THREAD is unset"
+		detail "llama.cpp will spawn one thread per HOST core and thrash. Measured 34x slower; every request times out. Set OLLAMA_NUM_THREAD=${CPU_COUNT}."
+	elif [ "$NT" -gt "$CPU_COUNT" ] 2>/dev/null; then
+		red "OLLAMA_NUM_THREAD=${NT} exceeds the ${CPU_COUNT}-CPU limit on ollama"
+		detail "Threads oversubscribe the quota and inference collapses. Set them equal."
+	else
+		green "OLLAMA_NUM_THREAD=${NT} matches the ${CPU_COUNT}-CPU limit on ollama"
+	fi
+fi
+
 if $COMPOSE ps --services 2>/dev/null | grep -qx "frontend"; then
 	red "a 'frontend' service is defined — the Vite dev server should not exist in production"
 else
