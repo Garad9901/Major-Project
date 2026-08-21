@@ -135,7 +135,20 @@
 		root * /srv
 
 		# Hashed asset filenames are immutable, so they can be cached hard.
-		@hashed path_regexp ^/assets/.+\.[0-9a-f]{8,}\.(js|css|woff2?|png|svg|jpg)$
+		#
+		# THE CHARACTER CLASS IS [A-Za-z0-9_-], NOT [0-9a-f], AND THAT MATTERS.
+		# It was hex, which never matched anything Vite produces: Vite emits
+		# BASE64 hashes, so the real filename is index-DAnMIlZA.js — uppercase
+		# letters, no match. Verified against a live production stack: the asset
+		# came back with NO Cache-Control header at all, so every page load
+		# re-downloaded a 530 KB bundle that never changes. On a campus network
+		# with a few hundred students that is the difference between a cold load
+		# once and a cold load every time.
+		#
+		# Also note the separator: Vite writes name-HASH.js (a hyphen), not
+		# name.HASH.js, so requiring a literal dot before the hash would fail for
+		# the same silent reason.
+		@hashed path_regexp ^/assets/.+[.-][A-Za-z0-9_-]{8,}\.(js|css|woff2?|png|svg|jpg)$
 		header @hashed Cache-Control "public, max-age=31536000, immutable"
 
 		# index.html must never be cached, or users keep loading an old bundle

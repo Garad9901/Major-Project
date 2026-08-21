@@ -151,10 +151,29 @@ else
 		green "no dev-server markers in the served HTML"
 	fi
 
-	if printf '%s' "$HTML" | grep -qE '/assets/[^"]+\.[0-9a-zA-Z_-]{6,}\.(js|css)'; then
+	# Vite writes name-HASH.js with a HYPHEN and a BASE64 hash. This pattern
+	# used to require a dot before the hash, so it never matched a real bundle
+	# and reported a warning on a perfectly good deployment.
+	if printf '%s' "$HTML" | grep -qE '/assets/[^"]+[.-][0-9a-zA-Z_-]{6,}\.(js|css)'; then
 		green "hashed production asset references present"
 	else
 		yellow "no hashed asset references found — verify the bundle was built"
+	fi
+
+	# The header, not just the filename. A hashed name is only useful if the
+	# immutable cache rule actually matches it — and it did not: Caddyfile.prod
+	# required a hex hash while Vite emits base64, so a 530 KB bundle that never
+	# changes was re-downloaded on every single page load. Nothing failed
+	# visibly, which is exactly why this is checked rather than assumed.
+	ASSET_PATH="$(printf '%s' "$HTML" | grep -oE '/assets/[^"]+\.js' | head -1)"
+	if [ -n "$ASSET_PATH" ]; then
+		ASSET_CC="$(curl -sk --max-time 10 -D- -o /dev/null "$SERVER_URL$ASSET_PATH" 2>/dev/null | tr -d '\015' | grep -i '^cache-control:' | cut -d' ' -f2-)"
+		case "$ASSET_CC" in
+			*immutable*) green "hashed assets are served immutable (${ASSET_CC})" ;;
+			"")          red  "hashed assets carry NO Cache-Control header"
+			             detail "Every page load re-downloads the bundle. Check the @hashed matcher in Caddyfile.prod." ;;
+			*)           yellow "hashed assets served with '${ASSET_CC}', expected immutable" ;;
+		esac
 	fi
 fi
 
