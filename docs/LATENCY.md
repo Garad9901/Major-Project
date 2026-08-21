@@ -677,3 +677,58 @@ hardware, and nothing gets a simple count below about 20 s.** The honest summary
 is the same as the previous pass reached, now with better numbers behind it: the
 overhead has been removed, and what is left is a 7B model reading and writing
 tokens on a CPU.
+
+---
+
+# Production correction — 21 August 2026
+
+**The 18 August conclusion on `num_thread` was right for development and
+useless for production.** Recording it here because the failure mode is the
+interesting part, not the number.
+
+That pass measured `num_thread` on the development stack and found 1.12x —
+marginal, thin evidence, not worth hardcoding a core count. So it shipped
+defaulting to `0` ("leave it to Ollama"). That reasoning was sound and the
+conclusion was wrong, because **development has no CPU limit and production
+does.**
+
+`docker-compose.prod.yml` caps ollama at `OLLAMA_CPU_LIMIT` (4.0). A docker CPU
+limit is a **quota, not a core count**: `nproc` inside the container still
+reports all 22 host threads. llama.cpp therefore spawned 22 threads to share
+4 CPUs' worth of quota.
+
+Measured on the production stack, same request, only this value changed:
+
+| `num_thread` | wall | generation |
+|---|---|---|
+| **4** (matches the cap) | **19.3 s** | **3.73 tok/s** |
+| default (22) | 201.9 s | **0.11 tok/s** |
+
+**34x.** At the default, every question exceeded `OLLAMA_READ_TIMEOUT=240` and
+users got "The AI service is temporarily unavailable". Proven to be Ollama
+rather than the application by making a **direct** `/api/chat` call that
+bypassed Django, gunicorn and Caddy entirely — it timed out identically.
+
+`OLLAMA_NUM_THREAD` must equal `OLLAMA_CPU_LIMIT`. `generate_secrets.sh` now
+writes it, and `verify_deployment.sh` fails the deployment if the effective
+value is unset or exceeds the container's cgroup quota.
+
+### What this says about the earlier measurements
+
+Every number in the 18 August section was taken without a CPU limit, so the
+**absolute** figures there describe development, not production. The relative
+findings (prefix caching is load-bearing; verification is already off the
+critical path; the premise median was the 90th percentile) are unaffected.
+
+But the honest summary is harsher than "one setting was wrong": **a variable
+that development cannot express was the difference between working and not.**
+Any future latency work must be re-measured under the production resource
+limits before its conclusion is trusted.
+
+### Production capacity, so far
+
+At 4 CPUs the measured generation rate is **3.73 tok/s**, against 7.4–8.2 tok/s
+in development. Roughly half. A simple SQL question measured **48 s** end to end
+over TLS through gunicorn once warm. The concurrency figure and the hardware
+requirement that goes with it are **not yet measured** — see
+FINAL_DEPLOYMENT_REPORT.md for what remains.
