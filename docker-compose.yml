@@ -168,6 +168,18 @@ services:
       # match LLM_MAX_CONCURRENCY: on CPU a second concurrent generation does not
       # run in parallel, it just splits the same cores and slows both.
       OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+      # MUST MATCH OLLAMA_NUM_CTX in the backend (common/ollama.py).
+      #
+      # Ollama loads a model at whatever context the FIRST request asks
+      # for. Warming with the CLI (which sends no num_ctx) loaded the 7B at
+      # the server default of 4096, and the app's first real request at
+      # 8192 then RELOADED it — so the warm-up bought nothing and the first
+      # user still waited for a cold load. Observed directly: `ollama ps`
+      # showed CONTEXT 4096 after warming, 8192 after the first question.
+      #
+      # Setting the server default makes the CLI and the application agree,
+      # so the model is loaded once, at the right size.
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_NUM_CTX:-8192}
       # MEASURED AND REJECTED — do not re-add without re-measuring.
       #
       # OLLAMA_FLASH_ATTENTION=1 together with OLLAMA_KV_CACHE_TYPE=q8_0 was
@@ -237,7 +249,50 @@ services:
             sleep 15
           done
         done
-        echo "All AI models are ready."
+
+        # DOWNLOADED IS NOT LOADED, AND THE DIFFERENCE IS ~15 MINUTES.
+        #
+        # `ollama pull` puts a model on disk. The first REQUEST for it then
+        # loads it into memory, which on CPU-only hardware takes minutes — and
+        # OLLAMA_READ_TIMEOUT usually fires first, so the first several
+        # questions after a deployment fail with "The AI service is temporarily
+        # unavailable" on a system that is working correctly. Measured on the
+        # reference machine: 15m23s to load the 7B and 3B.
+        #
+        # Loading them here moves that wait into deployment, where somebody is
+        # watching a log, instead of into the first user's first question.
+        #
+        # Uses the CLI, not an HTTP call: this image ships neither wget nor
+        # curl. A first version used `wget --post-data` and failed silently on
+        # every model for exactly that reason.
+        for model in "$$EMBEDDING_MODEL" "$$LLM_MODEL" "$$VERIFICATION_MODEL"; do
+          [ -z "$$model" ] && continue
+          case "$$model" in
+            *embed*) continue ;;   # embedding models take no chat request
+          esac
+          echo "Loading $$model into memory (several minutes on CPU; this is the wait that would otherwise hit your first user)..."
+          ollama run "$$model" "hi" >/dev/null 2>&1 || true
+        done
+
+        # VERIFY RESIDENCY, DO NOT ANNOUNCE IT.
+        #
+        # The previous version printed "All AI models are ready" unconditionally,
+        # including on the run where every preload had just failed. That is the
+        # same defect this whole change exists to fix — a component reporting
+        # ready when it is not — so this checks `ollama ps` and says which
+        # models are actually in memory.
+        MISSING=""
+        for model in "$$LLM_MODEL" "$$VERIFICATION_MODEL"; do
+          [ -z "$$model" ] && continue
+          ollama ps 2>/dev/null | grep -q "$$model" || MISSING="$$MISSING $$model"
+        done
+        if [ -n "$$MISSING" ]; then
+          echo "WARNING: these models are downloaded but NOT resident:$$MISSING"
+          echo "They will load on the first question, which may time out. The health"
+          echo "endpoint reports 'warming' and returns 503 until they are in memory."
+        else
+          echo "All AI models are downloaded AND resident. The system is ready to answer."
+        fi
     restart: "no"
     networks:
       - college_rag_net

@@ -151,11 +151,28 @@ def _index_is_fresh():
     return True
 
 
+def _language_model():
+    """Resident, not merely reachable.
+
+    This was `ollama.ping`, which GETs /api/tags — the models on DISK. It
+    answers 200 the moment the server is listening, so the dashboard showed a
+    green "Language model" row for the ~15 minutes a fresh deployment spends
+    loading, while every question timed out. Demonstrated by unloading all
+    three models and reloading this page: still green.
+
+    Returns False while warming, so the row goes red and REMEDY explains it.
+    That is the honest signal: the system genuinely cannot answer a question
+    yet.
+    """
+    ready, _detail = ollama.is_ready()
+    return ready
+
+
 CHECKS = [
     ("Database", _database, "Postgres — records, accounts and history"),
     ("Sessions & sign-in", _redis, "Redis — keeps people signed in and enforces the login lockout"),
     ("Read-only DB role", _readonly_role, "The restricted account the assistant queries with"),
-    ("Language model", ollama.ping, "Ollama — answers questions"),
+    ("Language model", _language_model, "Ollama — answers questions"),
     ("Search index", vector_store.ping, "Qdrant — finds descriptive content"),
     ("Index freshness", _index_is_fresh,
      "Whether sync_worker is still copying database changes into the search index"),
@@ -177,7 +194,14 @@ REMEDY = {
         "and set to reject writes rather than silently evict people's sessions."
     ),
     "Read-only DB role": "Restart the backend; it recreates the role and its grants on startup.",
-    "Language model": "docker compose ... restart ollama. First start after a restart is slow while the model loads.",
+    "Language model": (
+        "If this is a fresh start or a restart, it is LOADING and will clear on "
+        "its own — allow up to 15 minutes on CPU-only hardware. This row is red "
+        "rather than amber on purpose: until the model is resident the assistant "
+        "genuinely cannot answer, and questions will time out. If it stays red "
+        "well past that, check `docker compose ... logs ollama` and that the "
+        "server has enough free RAM to hold the models."
+    ),
     "Search index": "docker compose ... restart qdrant. Descriptive answers degrade; database answers keep working.",
     "Index freshness": (
         "sync_worker has stopped keeping up. Check `docker compose ps sync_worker` "

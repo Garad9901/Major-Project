@@ -163,10 +163,106 @@ def embeddings(model, prompt):
 
 
 def ping(timeout=3):
-    """Lightweight liveness probe for the health endpoint. Returns True if
-    Ollama responds, False otherwise (never raises)."""
+    """Is the Ollama SERVER reachable? Liveness only.
+
+    NOT A READINESS CHECK, AND THE DIFFERENCE MATTERS. /api/tags lists the
+    models on DISK and returns 200 the moment the server is listening —
+    regardless of whether any model is loaded into memory. Health used to call
+    this and report "llm: up", which is how a fresh deployment reported itself
+    healthy for the ~15 minutes it takes to load the models while every question
+    timed out. Demonstrated: with all three models explicitly unloaded,
+    /api/health/ still returned {"status":"ok","llm":"up"} with HTTP 200.
+
+    Use loaded_models()/is_ready() for readiness.
+    """
     try:
         resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=timeout)
         return resp.status_code == 200
     except requests.RequestException:
         return False
+
+
+def loaded_models(timeout=3):
+    """Model names currently RESIDENT in memory, from /api/ps.
+
+    Returns None when Ollama itself cannot be reached, which is a different
+    state from "reachable but nothing loaded" and the caller needs to tell them
+    apart. An empty list means the server is up and warming.
+
+    WHY RESIDENCY RATHER THAN A TEST GENERATION. Health is polled every 15s by
+    the container healthcheck and again by any uptime monitor. A real generation
+    per poll would occupy the single inference slot more or less permanently on
+    a CPU-only box — the check would become the outage. /api/ps is a cheap read
+    of the scheduler's own state and answers the question that actually matters:
+    is the model in memory, or will the next question pay a cold load?
+    """
+    try:
+        resp = requests.get(f"{OLLAMA_BASE_URL}/api/ps", timeout=timeout)
+        resp.raise_for_status()
+        return [m.get("name", "") for m in resp.json().get("models", [])]
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def _same_model(a, b):
+    """Compare model names, tolerating an implicit :latest on either side.
+
+    THE TAG IS PART OF THE IDENTITY. A first version compared only the part
+    before the colon, which made `qwen2.5:3b` and `qwen2.5:7b` the same model —
+    so a deployment with only the 3B resident reported itself ready to serve 7B
+    questions, reintroducing the exact bug this function exists to catch. Caught
+    by test_partial_residency_is_still_warming.
+
+    An ABSENT tag means "latest", which is the only equivalence allowed here.
+    """
+    if a == b:
+        return True
+    a_name, _, a_tag = a.partition(":")
+    b_name, _, b_tag = b.partition(":")
+    if a_name != b_name:
+        return False
+    return (a_tag or "latest") == (b_tag or "latest")
+
+
+def is_ready(models=None, timeout=3):
+    """(ready, detail) — can the next question be answered without a cold load?
+
+    `models` defaults to the models this deployment actually uses. A model that
+    is configured but not resident means WARMING, not ready: the first question
+    to need it pays a load measured in minutes on this hardware, and
+    OLLAMA_READ_TIMEOUT will usually fire first.
+    """
+    # Deduplicated, order preserved. VERIFICATION_MODEL and ROUTER_MODEL are
+    # both commonly qwen2.5:3b, and listing it twice in an operator-facing
+    # message reads like two separate things are missing.
+    seen, wanted = set(), []
+    for m in (models if models is not None else _configured_models()):
+        if m and m not in seen:
+            seen.add(m)
+            wanted.append(m)
+    resident = loaded_models(timeout=timeout)
+    if resident is None:
+        return False, "Ollama is not reachable"
+    missing = [m for m in wanted if not any(_same_model(m, r) for r in resident)]
+    if missing:
+        return False, "loading " + ", ".join(missing)
+    return True, "loaded: " + ", ".join(resident)
+
+
+def _configured_models():
+    """The models a question can actually reach, from the environment.
+
+    Read at call time rather than import time so a health check reflects the
+    running configuration even if it was changed under a restart.
+    """
+    llm = os.getenv("LLM_MODEL", "qwen2.5:7b")
+    return [
+        os.getenv("EMBEDDING_MODEL", "nomic-embed-text"),
+        llm,
+        # Optional per-agent overrides. Only counted when set to something
+        # different, so a deployment that does not use them is not reported as
+        # perpetually warming for a model it never loads.
+        os.getenv("VERIFICATION_MODEL", "") or "",
+        os.getenv("SYNTHESIS_MODEL", "") or "",
+        os.getenv("ROUTER_MODEL", "qwen2.5:3b"),
+    ]

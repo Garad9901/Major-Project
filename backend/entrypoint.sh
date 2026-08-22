@@ -51,6 +51,21 @@ else
   echo "[entrypoint] Demo data disabled (SEED_DEMO_DATA=false). Import your own records - see DATA_IMPORT.md."
 fi
 
+# WARM THE EMBEDDING MODEL.
+#
+# ollama-pull preloads the chat models with `ollama run`, but there is no
+# `ollama embed` subcommand and that image ships neither wget nor curl, so the
+# embedding model cannot be warmed from there. It is only ~376 MB and loads in
+# about a second — but until it is resident, /api/health/ reports "warming" and
+# returns 503, so without this a fresh deployment would sit at 503 forever
+# waiting for a model nothing had asked for.
+#
+# Best-effort and non-blocking: a failure here must not stop the backend
+# starting. The health endpoint will simply keep reporting "warming", which is
+# the truth.
+echo "[entrypoint] Warming the embedding model..."
+python warm_embedding.py || true
+
 if [ "$DJANGO_ENV" = "production" ]; then
   # WhiteNoise serves from STATIC_ROOT, and the production storage backend
   # (CompressedManifestStaticFilesStorage) requires the manifest this produces.
