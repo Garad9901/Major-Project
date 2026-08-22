@@ -261,8 +261,34 @@ services:
           # models stay resident.
           memory: ${OLLAMA_MEMORY_LIMIT:-12g}
           # Inference is the workload this server exists for, so Ollama is given
-          # the most CPU. Raise to match the core count on a larger machine.
-          cpus: "${OLLAMA_CPU_LIMIT:-4.0}"
+          # the most CPU.
+          #
+          # RAISED FROM 4.0 TO 8.0, from the sweep in docs/SCALING.md
+          # (22 Aug 2026). 4.0 looked inherited rather than derived, and it is
+          # the same value that produced the 34x oversubscription failure. Three
+          # measured reasons, none of them speculative:
+          #
+          #   1. It is past the knee. Prefill goes 15.3 -> 32.6 tok/s from 4 to
+          #      6 CPUs (2.1x), then gains only 14% across the whole range 6-16.
+          #      4.0 sat below that step and paid for it.
+          #   2. It is the most REPRODUCIBLE point past the knee: spread 1.10x
+          #      on prefill and 1.17x on generation, against 2.7x at 4.0. A
+          #      figure you can repeat is worth more than a marginally higher
+          #      one you cannot.
+          #   3. It leaves 14 of 22 threads for everything else, against
+          #      MEASURED headroom: every other service together idles at under
+          #      3.4% of one core and ~350 MB.
+          #
+          # MUST STAY EQUAL TO OLLAMA_NUM_THREAD. A docker CPU limit is a quota,
+          # not a core count; nproc inside the container still reports every host
+          # thread, so a mismatch means llama.cpp oversubscribes the quota and
+          # inference collapses. verify_deployment.sh fails the deployment if
+          # they disagree.
+          #
+          # On a different machine the knee will be elsewhere. Run
+          # scripts/capacity_test.sh on the target server rather than inheriting
+          # this number.
+          cpus: "${OLLAMA_CPU_LIMIT:-8.0}"
 
   ollama-pull:
     logging: *default-logging

@@ -229,12 +229,41 @@ reproducible. This is the same value that produced the 34× oversubscription
 failure. It looks inherited rather than derived, and nothing in this data
 justifies it.
 
-**3. Generation at 11 CPUs is non-monotonic and unstable** — median 3.41 tok/s,
-**worse than 8 (7.04) and worse than 6 (6.64)**, with a 2.7× spread and a worst
-case of 2.06. This was predicted: llama.cpp splits work evenly and waits for the
-slowest thread, so threads landing on E-cores gate the whole matmul. **Not
-re-run to tidy it up** — it is a result, and it is the strongest single argument
-that this platform cannot support a defensible capacity figure.
+**3. The 11-CPU generation figure is an OUTLIER, and its cause is not yet
+established.** Median 3.41 tok/s against 7.04 at 8 and 7.69 at 16, with a 2.7×
+spread and a worst case of 2.06.
+
+> **RETRACTION.** An earlier version of this section attributed the dip to
+> E-core gating — llama.cpp splitting work evenly and waiting for the slowest
+> thread. **That explanation is wrong and does not survive this table.**
+>
+> The hypothesis was suggested during review and I recorded it without checking
+> it against the data. Two problems:
+>
+> 1. **Gating cannot produce a dip and a recovery.** Even-split gating gives
+>    time ≈ (work / N) × slowest-thread-factor. Adding threads on slower cores
+>    reduces per-thread work while the slow factor stays roughly fixed, so
+>    throughput rises with diminishing returns. It is monotonic. It cannot fall
+>    at 11 and recover at 16.
+> 2. **The direction is inverted.** 16 CPUs reaches into the two low-power
+>    E-cores, the slowest on the die; 11 touches only P and standard E cores.
+>    Gating therefore predicts 16 < 11. Measured: 16 = 7.69, 11 = 3.41. The
+>    mechanism predicts the opposite of the observation.
+>
+> A mechanism that fails its own data is worse than no mechanism, because it
+> stops the question being asked.
+
+**Two candidates remain, and they are distinguishable:**
+
+- **Sampling.** A 2.7× spread with a worst case of 2.06 is bimodal. A median of
+  three draws from a bimodal distribution is not a point estimate — it is
+  whichever mode happened to take two of three. The same objection applies to
+  the 4-CPU point, which also spread 2.7×.
+- **Topology.** 11 is the only ODD allocation in the sweep. 4, 6, 8 and 16 all
+  align to SMT sibling pairs; 11 cannot. If `cpuset-cpus 0-10` splits a sibling
+  pair, that is a topological artefact with nothing to do with core classes.
+
+See "Discriminating the 11-CPU outlier" below for the experiment.
 
 ## The bandwidth prediction: half right, and the level is wrong
 
@@ -250,9 +279,25 @@ different places, exactly as expected.
 **The level is not.** The plateau sits at **~7 tok/s, not 11–14**. And the 4→6
 jump (5.16 → 6.64) is too large for a purely bandwidth-bound workload. The
 honest reading is that generation is compute-bound below ~6 cores and
-bandwidth-bound above it, with a ceiling roughly half the predicted band —
-plausibly because this is soldered laptop LPDDR5 rather than the desktop
-dual-channel DDR5 the estimate assumed.
+bandwidth-bound above it, with a ceiling roughly half the predicted band.
+
+**A second retraction, on WHY the level is lower.** An earlier version of this
+paragraph blamed "soldered laptop LPDDR5, slower than the desktop dual-channel
+DDR5 the estimate assumed". That is simply false: the 185H runs LPDDR5x at
+around **120 GB/s theoretical, HIGHER** than the desktop dual-channel DDR5 the
+estimate was based on. The explanation was plausible-sounding and backwards.
+
+Two things that do fit:
+
+- **Achieved bandwidth is not theoretical bandwidth.** Real-world sustained
+  throughput is typically 50–60% of the rated figure, which brings ~120 GB/s
+  down to ~60–70 GB/s and the predicted ceiling down with it.
+- **The 4.7 GB weights-only figure is incomplete.** At `num_ctx=8192` the KV
+  cache is read alongside the weights on every token, so the per-token traffic
+  is larger than the model file — and the estimate ignored it entirely.
+
+Both push the ceiling down from 11–14 towards the ~7 measured, without needing
+the memory to be slow.
 
 Recording it as stated rather than adjusting the prediction to fit: the shape
 was predicted correctly, the magnitude was not, and **the ceiling is a property
@@ -279,10 +324,20 @@ Measured idle cost of every non-inference service, together:
 They are I/O-bound and cheap, which is what makes giving inference 18% of the
 machine hard to justify.
 
-**`OLLAMA_CPU_LIMIT=8` is the defensible default on a machine of this shape:**
-past the knee, avoids the unstable 11-CPU region, and still leaves 14 of 22
-vCPUs — four hundred times what the other services were measured using.
+**`OLLAMA_CPU_LIMIT=8` is the defensible default on a machine of this shape**,
+for three reasons that are established:
 
-This is a recommendation about *this* curve. On a homogeneous server the knee
-will be somewhere else and there will be no E-core instability to avoid. Run
-`scripts/capacity_test.sh` on the target machine.
+1. **It is past the knee at 6**, so it gets the 2.1× prefill step rather than
+   sitting below it.
+2. **It has the tightest spread of the post-knee points** — 1.10× on prefill,
+   1.17× on generation. A reproducible number is worth more than a marginally
+   higher unreproducible one.
+3. **It leaves 14 of 22 threads for everything else**, against measured headroom
+   of under 3.4% of one core and ~350 MB.
+
+Deliberately NOT justified as "avoiding the unstable 11-CPU region". That claim
+is not established — see the retraction above. 8 would be the right choice on
+these three grounds even if 11 turns out to have been a sampling artefact.
+
+This is a recommendation about *this* curve, on this machine. Run
+`scripts/capacity_test.sh` on the target server.

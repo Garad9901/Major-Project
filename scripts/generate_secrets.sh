@@ -228,7 +228,16 @@ OLLAMA_READ_TIMEOUT=240
 #
 # If you raise OLLAMA_CPU_LIMIT, raise this to match. If you lower it, lower
 # this. They must agree.
-OLLAMA_NUM_THREAD=4
+OLLAMA_NUM_THREAD=8
+
+# Must equal OLLAMA_NUM_THREAD above. Raised from 4 to 8 on measured grounds
+# (docs/SCALING.md, 22 Aug 2026): 4 sat BELOW the throughput knee and was the
+# least reproducible point on the curve, with a 2.7x spread between identical
+# runs. 8 is past the knee and the tightest of the post-knee points.
+#
+# On YOUR hardware the knee will be somewhere else. Run
+# scripts/capacity_test.sh before trusting either number.
+OLLAMA_CPU_LIMIT=8.0
 
 # The model used for the fact-checking pass ONLY.
 #

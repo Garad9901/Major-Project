@@ -198,13 +198,42 @@ run_wave() {
 		esac
 	done
 	MEAN=0; [ "$OK" -gt 0 ] && MEAN=$((TOTAL_T / OK))
+
+	# SPREAD, NOT JUST A MEAN.
+	#
+	# A mean over a wide distribution is not a point estimate. We measured a
+	# 2.7x spread between identical runs on our own development hardware, where
+	# a median of three samples turned out to be whichever mode happened to win
+	# two draws — it looked like a stable figure and was a coin flip.
+	#
+	# So the rule, and it now travels with the script: WHERE SPREAD EXCEEDS
+	# ~1.5x, DO NOT QUOTE THE MEAN. Take more samples or quote the range.
+	FASTEST=0; SLOWEST=0
+	for F in "$WORK"/*; do
+		case "$F" in *.body) continue ;; esac
+		set -- $(cat "$F")
+		[ "$1" = "ok" ] || continue
+		[ "$FASTEST" -eq 0 ] || [ "$2" -lt "$FASTEST" ] && FASTEST=$2
+		[ "$2" -gt "$SLOWEST" ] && SLOWEST=$2
+	done
 	rm -rf "$WORK"
+
+	SPREAD_NOTE=""
+	if [ "$FASTEST" -gt 0 ] && [ "$((SLOWEST * 10 / FASTEST))" -gt 15 ]; then
+		SPREAD_NOTE="  <-- SPREAD EXCEEDS 1.5x; the mean is NOT a reliable figure"
+	fi
 
 	echo "  $LABEL"
 	echo "    answered      : $OK / $USERS"
 	echo "    turned away   : $BUSY  (told the assistant is busy — correct behaviour)"
 	echo "    failed        : $ERR"
 	echo "    mean answer   : ${MEAN}s (over the answered ones)"
+	echo "    range         : ${FASTEST}s - ${SLOWEST}s${SPREAD_NOTE}"
+	if [ -n "$SPREAD_NOTE" ]; then
+		echo "                    Re-run with more USERS, or quote the range rather"
+		echo "                    than the mean. A wide spread usually means the"
+		echo "                    machine is contended or thermally throttling."
+	fi
 	echo
 	# stash for the summary
 	echo "$OK $BUSY $ERR $MEAN" > "/tmp/capacity_$SHAPE"
