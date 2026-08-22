@@ -172,3 +172,117 @@ Coalescing and caching only help when questions **repeat**. For a management
 dashboard — where many people look at the same few figures — that is the real
 pattern and the system now handles it. For 50 genuinely distinct questions at
 once, nothing short of a GPU changes the answer.
+
+---
+
+# CPU allocation sweep — 22 August 2026
+
+**Measured for SHAPE, not as a specification.** See `scripts/capacity_test.sh`
+for why no figure from this machine is a specification for yours.
+
+**Method.** `qwen2.5:7b`, identical 2,067-token prompt, `num_predict=40`,
+`num_ctx=8192`. Ollama restarted per point with `--cpus N --cpuset-cpus 0-(N-1)`.
+`OLLAMA_NUM_THREAD` set to match the allocation at **every** point — a point
+measured with a mismatched thread count measures the 34× oversubscription bug,
+not the cap. 3 reps each. Production Ollama stopped throughout, so nothing
+contended.
+
+**Host caveat, and it is the important one.** The Docker VM presents a uniform
+11 cores × 2 threads. The real host is an Intel Core Ultra 9 185H: **6
+performance cores, 8 efficiency cores, 2 low-power cores**. `cpuset-cpus` pins
+placement *within the VM*; the hypervisor still chooses which physical core each
+vCPU lands on. So the P/E asymmetry is present in the results and invisible to
+the measurement.
+
+## Prefill — tok/s
+
+| CPUs | rep 1 | rep 2 | rep 3 | **median** | spread |
+|---|---|---|---|---|---|
+| 4 | 9.6 | 15.3 | 25.7 | **15.3** | **2.7×** |
+| **6** | 32.0 | 32.6 | 33.1 | **32.6** | 1.03× |
+| 8 | 35.9 | 32.7 | 33.4 | **33.4** | 1.10× |
+| 11 | 36.0 | 33.4 | 35.5 | **35.5** | 1.08× |
+| 16 | 37.4 | 37.1 | 35.8 | **37.1** | 1.04× |
+
+## Generation — tok/s
+
+| CPUs | rep 1 | rep 2 | rep 3 | **median** | spread |
+|---|---|---|---|---|---|
+| 4 | 3.01 | 5.16 | 5.97 | **5.16** | 2.0× |
+| 6 | 6.64 | 6.64 | 6.20 | **6.64** | 1.07× |
+| 8 | 6.12 | 7.04 | 7.18 | **7.04** | 1.17× |
+| **11** | 5.61 | 3.41 | 2.06 | **3.41** | **2.7×** |
+| 16 | 8.83 | 6.25 | 7.69 | **7.69** | 1.41× |
+
+## What the shape says
+
+**1. The knee is at 6, and 6 is the host's P-core count.** Prefill goes
+15.3 → 32.6 tok/s from 4 to 6 CPUs (**2.1×**), then gains only 14% across the
+whole range 6 → 16. A knee landing exactly on the performance-core count is
+consistent with E-core threads contributing little; it is not proof, because
+the VM hides placement.
+
+**2. The shipped default of 4 is the worst point on the curve, and the least
+predictable.** Half the prefill throughput of 6, and a **2.7× spread** between
+identical runs. It sits below the knee, in the region where results are not
+reproducible. This is the same value that produced the 34× oversubscription
+failure. It looks inherited rather than derived, and nothing in this data
+justifies it.
+
+**3. Generation at 11 CPUs is non-monotonic and unstable** — median 3.41 tok/s,
+**worse than 8 (7.04) and worse than 6 (6.64)**, with a 2.7× spread and a worst
+case of 2.06. This was predicted: llama.cpp splits work evenly and waits for the
+slowest thread, so threads landing on E-cores gate the whole matmul. **Not
+re-run to tidy it up** — it is a result, and it is the strongest single argument
+that this platform cannot support a defensible capacity figure.
+
+## The bandwidth prediction: half right, and the level is wrong
+
+The prediction was that generation is memory-bandwidth-bound at roughly
+**11–14 tok/s** regardless of core count, so throughput would plateau well
+before 11 CPUs.
+
+**The plateau is real.** Beyond 6 CPUs generation gains little: 6.64 → 7.04 →
+7.69 across 6, 8 and 16 — **+16% for 2.7× the cores**. Prefill, which
+parallelises, keeps climbing while generation does not. The two knees are in
+different places, exactly as expected.
+
+**The level is not.** The plateau sits at **~7 tok/s, not 11–14**. And the 4→6
+jump (5.16 → 6.64) is too large for a purely bandwidth-bound workload. The
+honest reading is that generation is compute-bound below ~6 cores and
+bandwidth-bound above it, with a ceiling roughly half the predicted band —
+plausibly because this is soldered laptop LPDDR5 rather than the desktop
+dual-channel DDR5 the estimate assumed.
+
+Recording it as stated rather than adjusting the prediction to fit: the shape
+was predicted correctly, the magnitude was not, and **the ceiling is a property
+of the memory subsystem that has to be measured per machine.**
+
+**The buyer-facing consequence stands, and it is the useful part:** past the
+P-core count, more cores buy almost nothing for generation. Anyone sizing a
+server for this workload should be asking about **memory channels and speed**,
+not core count — which is not what a hardware spec usually says.
+
+## Recommended allocation
+
+Measured idle cost of every non-inference service, together:
+
+| service | CPU | memory |
+|---|---|---|
+| postgres | 2.89% | 30 MB |
+| redis | 0.41% | 8 MB |
+| backend (gunicorn) | 0.02% | 148 MB |
+| qdrant | 0.02% | 59 MB |
+| caddy / sync_worker / backup | ~0.00% | 102 MB combined |
+| **total** | **< 3.4% of one core** | **~350 MB** |
+
+They are I/O-bound and cheap, which is what makes giving inference 18% of the
+machine hard to justify.
+
+**`OLLAMA_CPU_LIMIT=8` is the defensible default on a machine of this shape:**
+past the knee, avoids the unstable 11-CPU region, and still leaves 14 of 22
+vCPUs — four hundred times what the other services were measured using.
+
+This is a recommendation about *this* curve. On a homogeneous server the knee
+will be somewhere else and there will be no E-core instability to avoid. Run
+`scripts/capacity_test.sh` on the target machine.
