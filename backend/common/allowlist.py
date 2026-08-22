@@ -69,11 +69,39 @@ ALLOWED_TABLES = [
 # it. Any table without an entry here simply renders without a note.
 TABLE_NOTES = {
     "departments": "The college's own academic departments.",
+    # THE REDIRECT LIST HERE HAS TO INCLUDE COUNTS, AND IT DID NOT.
+    #
+    # It used to end "...for scores, competency levels, experience or
+    # development needs use faculty_development instead" — a list that omits
+    # the single most common question anyone asks about faculty. Asked "How
+    # many faculty are in the Computer Science department?" the model read this
+    # note, saw that counting was not in the redirect list, and generated
+    #
+    #     SELECT COUNT(*) FROM faculty WHERE department_id = (
+    #         SELECT id FROM departments WHERE name = 'Computer Science')
+    #
+    # which returns 2, against the survey's 1,916. Both notes were already
+    # reaching the prompt — that was checked before anything was changed. The
+    # guidance was simply scoped too narrowly to cover the case.
+    #
+    # Retrieved from audit log entry 801, not reasoned about.
+    #
+    # PHRASED AS A REDIRECT, NOT A PROHIBITION, AND THAT ORDERING IS MEASURED.
+    # A first attempt led with "DO NOT use this table to COUNT faculty". It
+    # stopped the wrong answer and produced NO_QUERY instead — the model took
+    # the prohibition and concluded the question was unanswerable rather than
+    # switching tables. Telling it where to GO beats telling it where not to be.
+    # The worked examples in sql_agent/llm_client.py carry most of the weight;
+    # this note only has to agree with them.
     "faculty": (
-        "The college's STAFF DIRECTORY: named individual employees with email, "
-        "designation and a department_id. Only a handful of rows. This is NOT "
-        "the faculty development survey — for scores, competency levels, "
-        "experience or development needs use faculty_development instead."
+        "The college's STAFF DIRECTORY: a short contact list of named employees "
+        "with email, designation and department_id. ONLY A HANDFUL OF ROWS.\n"
+        "  Use it ONLY for a NAMED individual's contact details or designation.\n"
+        "  For HOW MANY faculty there are — in total, by department, by rank, "
+        "or by any other attribute — use faculty_development, which holds the "
+        "college's actual faculty population. Counting rows here counts "
+        "directory entries rather than people, and the two differ by three "
+        "orders of magnitude."
     ),
     "programs": "Degree programs offered by each department.",
     "courses": "Individual courses, with code, title, credits and description.",

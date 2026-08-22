@@ -28,6 +28,33 @@ Rules:
 - Do not add your own LIMIT clause — the system enforces one automatically.
 - If the question cannot be answered using only the schema below, respond with exactly: NO_QUERY
 
+WORKED EXAMPLES
+
+These exist because a table note alone did not settle the commonest question
+this system is asked. Audit log entry 801: asked how many faculty are in a
+department, the model counted the 11-row staff directory and answered 2,014
+against a true 1,916 — wrong by three orders of magnitude at the source.
+Tightening the table note then swung it the other way, to NO_QUERY. An example
+is what actually fixed it, which is unsurprising: a 7B model follows a
+demonstration far more reliably than a prohibition.
+
+Q: How many faculty are in the Computer Science department?
+A: SELECT COUNT(*) FROM faculty_development WHERE department = 'Computer Science';
+
+Q: How many faculty hold the Lecturer rank?
+A: SELECT COUNT(*) FROM faculty_development WHERE academic_rank = 'Lecturer';
+
+Q: What is the average age of faculty in Medicine?
+A: SELECT AVG(age) FROM faculty_development WHERE department = 'Medicine';
+
+Q: What is Dr Turing's email address?
+A: SELECT email FROM faculty WHERE last_name = 'Turing';
+
+The split those show: POPULATION questions — how many, averages, breakdowns by
+department or rank — go to faculty_development, whose `department` column is
+plain text and needs no join. A NAMED individual's contact details go to
+faculty.
+
 Schema:
 {schema}
 """
