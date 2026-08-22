@@ -12,6 +12,22 @@ logger = logging.getLogger("verification_agent")
 
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
 
+# Shown in place of an answer whose figure was refuted.
+#
+# CONTAINS NO NUMBER, and that is the requirement rather than a style choice.
+# Not the figure the model wrote (it is unsupported) and not the figure the
+# query returned (verification cannot vouch for it either — in the case that
+# prompted this, the query had counted the wrong table). A reader takes a number
+# and drops the hedge; the only safe output here is no number.
+#
+# It says what happened and what to do, because "something went wrong" sends the
+# user away with nothing.
+REFUTED_MESSAGE = (
+    "I found a figure for this, but it did not match the college records when I "
+    "checked it, so I have not shown it — a wrong number here is worse than no "
+    "number. Please ask the college office to confirm this one."
+)
+
 
 class VerdictUnreadable(Exception):
     """The verifier's output could not be parsed, so no check actually happened.
@@ -177,6 +193,52 @@ def verify_and_correct(question, route, answer, sql_result=None, rag_chunks=None
         question, answer, sql_result=sql_result, rag_chunks=rag_chunks,
         web_pages=web_pages,
     )
+    # TIER 1a — REFUTED. The answer contradicts the source, provably.
+    #
+    # SUPPRESS THE FIGURE. DO NOT SUBSTITUTE THE SOURCE VALUE.
+    #
+    # Correcting the answer to the retrieved number is the obvious move and it
+    # is wrong. In audit entry 801 the query returned 2 (it had counted an
+    # 11-row staff directory) while the true answer was 1,916. "Correcting"
+    # 2,014 to 2 would have shipped a confident wrong answer marked CONFIRMED —
+    # strictly worse than the hedged fabrication it replaced, because the hedge
+    # is the only thing that made a reader doubt it.
+    #
+    # Verification's warrant is "this figure is not supported by the evidence".
+    # It is not "this other figure is right": it cannot see that the evidence
+    # itself came from the wrong table. So the user is told the number could
+    # not be confirmed and is not shown a number at all — neither the one the
+    # model wrote nor the one the query returned.
+    if fast.refuted:
+        run_id = uuid.uuid4()
+        VerificationLog.objects.bulk_create([
+            VerificationLog(
+                run_id=run_id, question=question, route=route,
+                original_answer=answer, final_answer=REFUTED_MESSAGE,
+                claim_text=fast.refutation, supported=False, confidence=1.0,
+                evidence=fast.reason, action_taken="suppressed_refuted",
+            )
+        ])
+        # WARNING, not info: a refutation means the model fabricated a figure,
+        # which is the failure this system most needs an operator to see.
+        logger.warning(
+            "REFUTED and suppressed question=%r reason=%s run_id=%s",
+            question[:80], fast.reason, run_id,
+        )
+        result = VerificationResult(
+            question=question, original_answer=answer,
+            final_answer=REFUTED_MESSAGE,
+            claims=[{
+                "text": fast.refutation, "supported": False, "confidence": 1.0,
+                "evidence": fast.reason, "correct_value": None,
+            }],
+            was_corrected=True,
+        )
+        result.run_id = run_id
+        result.fast_path = True
+        result.refuted = True
+        return result
+
     if fast.decided:
         run_id = uuid.uuid4()
         VerificationLog.objects.bulk_create([

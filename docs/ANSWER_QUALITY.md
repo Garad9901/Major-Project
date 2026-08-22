@@ -285,3 +285,59 @@ VERIFY_NUM_PREDICT=900        # was 400 — too small, truncated the verdict JSO
 SYNTHESIS_NUM_PREDICT=900     # unchanged; a runaway guard, not a length lever
 ENABLE_VERIFICATION=true      # false removes the appendix entirely, and the check
 ```
+
+---
+
+# Prompt design: prohibition removes, redirect steers (22 August 2026)
+
+A note recorded because it will recur every time a table description needs
+tightening, and because getting it wrong is not obvious in advance.
+
+**The situation.** Audit log entry 801: asked *"How many faculty are in the
+Computer Science department?"*, the SQL agent counted `faculty` — an 11-row
+staff directory — instead of `faculty_development`, the 13,000-row survey. Both
+table notes were already in the prompt; the `faculty` note's redirect list read
+*"for scores, competency levels, experience or development needs use
+faculty_development instead"* and simply omitted counting.
+
+**The wrong fix, measured.** The note was rewritten to lead with a prohibition:
+
+```
+DO NOT use this table to COUNT faculty, to answer 'how many faculty', or for
+any total, average or breakdown ...
+```
+
+Result: the model stopped producing the wrong query and produced **`NO_QUERY`**
+instead. Asked the commonest question in the system, it now refused to answer at
+all. It had taken the ban and concluded the question was unanswerable, rather
+than moving to the other table.
+
+> **Prohibition removes a capability; it does not redirect one.** A 7B model
+> told what not to do will drop the behaviour rather than substitute a better
+> one. It needs somewhere to go, not just somewhere to avoid.
+
+**The fix that worked**, in two parts:
+
+1. The note phrased as a **redirect**, with the destination in the same sentence
+   as the trigger — *"For HOW MANY faculty there are … use
+   faculty_development"* — and the prohibition demoted to an explanation
+   afterwards.
+2. **Four worked examples** in the SQL system prompt, which previously had
+   none. These carry most of the weight; a demonstration outperforms any amount
+   of prose for a model this size.
+
+**Measured after the change** — three questions, all previously at risk:
+
+| Question | Table chosen | Result | Expected |
+|---|---|---|---|
+| Faculty in Computer Science | `faculty_development` | **1,916** | 1,916 |
+| Faculty in Medicine | `faculty_development` | **1,046** | 1,046 |
+| Faculty in Science | `faculty_development` | **1,803** | 1,803 |
+
+**The examples are free at request time.** They live in the stable system
+prompt, so they sit in Ollama's prefix cache. Measured on the production stack:
+a ~1,700-token prompt prefilled in **177–1,415 ms**. The uncached prefill rate
+under the production CPU limit is ~26 tok/s, which would put 1,700 fresh tokens
+at roughly 65 seconds — so the prefix is being reused and the examples are paid
+once per model load, not per question. Same reasoning that kept the
+untrusted-content nonce out of the system prompt; see docs/LATENCY.md.

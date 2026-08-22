@@ -133,12 +133,44 @@ def _ungrounded_proper_nouns(answer, source):
 
 
 class FastCheckResult:
-    """`decided` False means: this module declines, use the LLM."""
+    """Three outcomes, not two.
 
-    def __init__(self, decided, claims=None, reason=""):
+    This module used to compute three things and return two. It would establish
+    that a number in the answer was ABSENT FROM THE SOURCE — positive evidence
+    of fabrication — and then return `decided=False`, which means "I cannot
+    tell, ask the LLM". The evidence was discarded at the point it was strongest.
+
+    Audit log entry 801 is what that cost. Handed a single row `{'count': 2}`,
+    synthesis wrote "There are 2,014 faculty in the Computer Science
+    department." This module correctly found 2014 absent from the source, said
+    "I cannot tell", deferred to the LLM tier, and the LLM tier timed out. The
+    fabricated figure shipped with a hedge attached.
+
+        confirmed  every checkable claim matched the source
+        declined   cannot be settled here; the LLM tier should run
+        refuted    the answer contradicts the source, provably, with no
+                   interpretation required
+    """
+
+    CONFIRMED = "confirmed"
+    DECLINED = "declined"
+    REFUTED = "refuted"
+
+    def __init__(self, decided, claims=None, reason="", verdict=None, refutation=""):
+        # `decided` is kept as the CONFIRM flag it always was, so every existing
+        # caller and test keeps its meaning. A refutation is not "decided" in
+        # that sense — it does not mean "this answer passed".
         self.decided = decided
         self.claims = claims or []
         self.reason = reason
+        self.verdict = verdict or (self.CONFIRMED if decided else self.DECLINED)
+        # Operator-facing sentence naming what contradicted what. Never shown
+        # to the user; see the boundary in _try_scalar_refute.
+        self.refutation = refutation
+
+    @property
+    def refuted(self):
+        return self.verdict == self.REFUTED
 
 
 def try_fast_check(question, answer, sql_result=None, rag_chunks=None, web_pages=None):
@@ -154,10 +186,96 @@ def try_fast_check(question, answer, sql_result=None, rag_chunks=None, web_pages
         return FastCheckResult(False, reason="fast check errored")
 
 
+def _try_scalar_refute(text, sql_result):
+    """The narrowest possible refutation: a contradicted scalar.
+
+    ENTRY CONDITIONS ARE ITS OWN, NOT THE CONFIRM PATH'S. A wrong decline costs
+    seconds of LLM time; a wrong refutation suppresses a correct answer in front
+    of a user. Raising the consequence raises the bar on the input, so this
+    fires only when there is nothing left to interpret:
+
+        * the SQL ran without error
+        * it returned EXACTLY one row with EXACTLY one column
+        * that value is numeric
+        * the answer contains at least one number
+        * NONE of the answer's numbers match the scalar
+
+    "None match" rather than "any differs" is deliberate, and it is what makes
+    derived arithmetic safe. An answer that says "1,916, which is 15% of the
+    total" contains 1916 and 15; the scalar is present, so this does not fire.
+    Only an answer that never states the retrieved figure at all is refuted.
+
+    Note the length cap from the confirm path is NOT inherited. A fabricated
+    count is just as wrong inside a long answer, and the check is exact either
+    way — there is no matching to get fuzzy over.
+
+    THE BOUNDARY, AND IT IS THE WHOLE REASON THIS DOES NOT AUTO-CORRECT:
+    this function's warrant is "the answer's figure is not supported by the
+    evidence". It is NOT "the source figure is right". It cannot know that,
+    because it cannot see that the evidence itself came from the wrong table —
+    which is exactly what happened in entry 801, where the source said 2 and
+    the truth was 1,916. Substituting the source value there would have shipped
+    "There are 2 faculty in Computer Science" marked CONFIRMED, which is
+    strictly worse than the fabrication it replaced. So: suppress and say so.
+    Never substitute. The caller must not print `scalar` to a user.
+    """
+    if sql_result is None or getattr(sql_result, "error", None):
+        return None
+    rows = getattr(sql_result, "rows", None)
+    if not rows or len(rows) != 1:
+        return None
+
+    row = rows[0]
+    values = list(row.values()) if isinstance(row, dict) else list(row)
+    if len(values) != 1:
+        return None
+
+    scalar = values[0]
+    if isinstance(scalar, bool) or not isinstance(scalar, (int, float)):
+        # bool is an int subclass; a True/False cell is not a measurement.
+        return None
+    scalar = float(scalar)
+
+    answer_numbers = _numbers_in(text)
+    if not answer_numbers:
+        return None
+
+    if any(_matches_a_source_number(n, {scalar}) for n in answer_numbers):
+        return None
+
+    return FastCheckResult(
+        False,
+        verdict=FastCheckResult.REFUTED,
+        reason=(
+            f"answer states {sorted(answer_numbers)} but the query returned the "
+            f"single value {scalar:g}"
+        ),
+        refutation=(
+            f"The query returned one value ({scalar:g}). The answer stated "
+            f"{', '.join(f'{n:g}' for n in sorted(answer_numbers))} instead, "
+            f"which appears nowhere in the retrieved data."
+        ),
+    )
+
+
 def _try(answer, sql_result, rag_chunks, web_pages):
     text = (answer or "").strip()
     if not text:
         return FastCheckResult(False, reason="empty answer")
+
+    # REFUTATION IS CHECKED BEFORE THE CONFIRM PATH'S GUARDS, on purpose.
+    #
+    # It has to be, because every guard below DECLINES, and a decline was the
+    # wrong response to positive evidence in entry 801. If a contradicted scalar
+    # sat inside a 900-character answer, the length cap would hand it to the LLM
+    # tier and the contradiction would never be looked at at all.
+    #
+    # The one guard it does NOT jump is the SQL-error check, which is inside
+    # _try_scalar_refute itself: you cannot refute an answer against a lookup
+    # that failed, because a failed lookup is not evidence of anything.
+    refuted = _try_scalar_refute(text, sql_result)
+    if refuted is not None:
+        return refuted
 
     if len(text) > MAX_FAST_ANSWER_CHARS:
         return FastCheckResult(

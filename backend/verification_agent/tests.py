@@ -13,7 +13,12 @@ said an answer was fine without checking it". Every test below that expects
 from django.test import SimpleTestCase
 
 from verification_agent import fast_check
-from verification_agent.service import VerdictUnreadable, _parse_claims
+from verification_agent.fast_check import try_fast_check
+from verification_agent.service import (
+    REFUTED_MESSAGE,
+    VerdictUnreadable,
+    _parse_claims,
+)
 
 
 class _SqlResult:
@@ -66,12 +71,36 @@ class FastPathAcceptsTests(SimpleTestCase):
 class FastPathDeclinesTests(SimpleTestCase):
     """Each of these is a way the fast path could wrongly bless a bad answer."""
 
-    def test_declines_when_a_number_is_not_in_the_source(self):
+    def test_a_contradicted_scalar_now_REFUTES_rather_than_declining(self):
+        """BEHAVIOUR CHANGED HERE, deliberately — see audit log entry 801.
+
+        This used to assert `decided is False` with reason "not found in
+        source", i.e. the fast path declined and the LLM tier took over. That
+        decline is what let a fabricated figure reach a user: the LLM tier timed
+        out and the answer shipped hedged.
+
+        Against a SINGLE-SCALAR source the contradiction is not ambiguous, so it
+        is now a refutation. The test's original intent — the fast path must
+        never wrongly bless a bad answer — holds more strongly than before: it
+        no longer merely abstains, it rejects.
+        """
         sql = _SqlResult(rows=[{"count": 3053}], columns=["count"])
         result = fast_check.try_fast_check(
             "q", "There are 9,999 Lecturers.", sql_result=sql
         )
+        self.assertFalse(result.decided, "must never be treated as confirmed")
+        self.assertTrue(result.refuted)
+
+    def test_still_declines_when_the_source_is_not_a_single_scalar(self):
+        """The decline path is not gone, only narrowed. With more than one row
+        there is no single figure the answer was obliged to state, so an
+        unmatched number is genuinely 'cannot tell' and belongs to the LLM."""
+        sql = _SqlResult(rows=[{"n": 2073}, {"n": 1046}], columns=["n"])
+        result = fast_check.try_fast_check(
+            "q", "There are 9,999 faculty altogether.", sql_result=sql
+        )
         self.assertFalse(result.decided)
+        self.assertFalse(result.refuted)
         self.assertIn("not found in source", result.reason)
 
     def test_adjacent_integers_are_not_confused(self):
@@ -220,3 +249,174 @@ class CorrectionOnlyWhenCorrectableTests(SimpleTestCase):
             '"evidence": "e", "correct_value": ""}]}'
         )
         self.assertEqual([c for c in claims if c.get("correct_value")], [])
+
+
+class ScalarRefutationTests(SimpleTestCase):
+    """The narrow refute rule, from audit log entry 801.
+
+    Handed one row `{'count': 2}`, synthesis wrote "There are 2,014 faculty in
+    the Computer Science department." fast_check found 2014 absent from the
+    source and returned "I cannot tell" — discarding the evidence at the point
+    it was strongest. The LLM tier then timed out and the fabrication shipped
+    with a hedge.
+    """
+
+    def _sql(self, rows, columns=None, error=None):
+        class R:
+            pass
+        r = R()
+        r.rows = rows
+        r.columns = columns or ["count"]
+        r.error = error
+        r.generated_sql = "SELECT COUNT(*) FROM faculty_development"
+        return r
+
+    # --- the case that prompted this ----------------------------------------
+
+    def test_entry_801_is_refuted(self):
+        result = try_fast_check(
+            "How many faculty are in the Computer Science department?",
+            "There are 2,014 faculty in the Computer Science department.",
+            sql_result=self._sql([{"count": 2}]),
+        )
+        self.assertTrue(result.refuted)
+        self.assertFalse(result.decided)
+
+    def test_a_matching_scalar_is_not_refuted(self):
+        result = try_fast_check(
+            "How many faculty hold the Lecturer rank?",
+            "There are 3,053 faculty members holding the Lecturer rank.",
+            sql_result=self._sql([{"count": 3053}]),
+        )
+        self.assertFalse(result.refuted)
+
+    def test_thousands_separators_do_not_cause_a_false_refutation(self):
+        """1,916 in the answer is 1916 in the row. A normaliser bug here would
+        suppress correct answers, which is the expensive direction."""
+        for written in ("1,916", "1916"):
+            with self.subTest(written=written):
+                result = try_fast_check(
+                    "How many faculty are in Computer Science?",
+                    f"There are {written} faculty in Computer Science.",
+                    sql_result=self._sql([{"count": 1916}]),
+                )
+                self.assertFalse(result.refuted, written)
+
+    # --- entry conditions: everything below must NOT refute -----------------
+
+    def test_multiple_rows_do_not_refute(self):
+        """Only an unambiguous single scalar. A breakdown has no one figure the
+        answer must state."""
+        result = try_fast_check(
+            "Faculty per department?",
+            "Engineering has 2,073 and Medicine has 1,046.",
+            sql_result=self._sql([{"n": 2073}, {"n": 1046}]),
+        )
+        self.assertFalse(result.refuted)
+
+    def test_multiple_columns_do_not_refute(self):
+        result = try_fast_check(
+            "How many Expert faculty in CS and their mean age?",
+            "There are 134, with a mean age of 58.71.",
+            sql_result=self._sql([{"count": 134, "mean_age": 58.71}],
+                                 columns=["count", "mean_age"]),
+        )
+        self.assertFalse(result.refuted)
+
+    def test_a_failed_lookup_never_refutes(self):
+        """A failed lookup is not evidence of anything. Refuting against one
+        would turn an outage into an accusation of fabrication."""
+        result = try_fast_check(
+            "How many faculty?",
+            "There are 1,916 faculty.",
+            sql_result=self._sql(None, error="connection refused"),
+        )
+        self.assertFalse(result.refuted)
+
+    def test_no_numbers_in_the_answer_does_not_refute(self):
+        result = try_fast_check(
+            "How many faculty are in Chemistry?",
+            "The college records do not cover that.",
+            sql_result=self._sql([{"count": 0}]),
+        )
+        self.assertFalse(result.refuted)
+
+    def test_a_boolean_cell_is_not_a_measurement(self):
+        """bool is an int subclass in Python; a True/False cell must not be
+        compared against a count."""
+        result = try_fast_check(
+            "Is the Engineering department active?",
+            "Yes, it has 2,073 faculty.",
+            sql_result=self._sql([{"active": True}], columns=["active"]),
+        )
+        self.assertFalse(result.refuted)
+
+    def test_derived_arithmetic_is_safe_when_the_base_is_stated(self):
+        """"None match" rather than "any differs" is what makes this safe: the
+        answer states the retrieved figure alongside the derived one."""
+        result = try_fast_check(
+            "How many faculty are in Computer Science?",
+            "There are 1,916 faculty in Computer Science, about 15% of the college.",
+            sql_result=self._sql([{"count": 1916}]),
+        )
+        self.assertFalse(result.refuted)
+
+    def test_a_long_answer_is_still_refuted(self):
+        """The confirm path's length cap is deliberately NOT inherited: a
+        fabricated count is just as wrong inside a long answer, and the
+        comparison is exact either way."""
+        long_answer = ("There are 2,014 faculty in the Computer Science department. "
+                       + "Additional descriptive prose. " * 40)
+        self.assertGreater(len(long_answer), 700)
+        result = try_fast_check(
+            "How many faculty are in the Computer Science department?",
+            long_answer,
+            sql_result=self._sql([{"count": 2}]),
+        )
+        self.assertTrue(result.refuted)
+
+
+class RefutationNeverSubstitutesTests(SimpleTestCase):
+    """THE BOUNDARY, and the reason the whole rule is suppress-only.
+
+    In entry 801 the query returned 2 because it had counted an 11-row staff
+    directory; the true answer was 1,916. Auto-correcting 2,014 to 2 would have
+    shipped "There are 2 faculty in Computer Science" marked CONFIRMED — a
+    confident wrong answer, strictly worse than the hedged fabrication, because
+    the hedge was the only thing making a reader doubt it.
+
+    Verification can say "this figure is unsupported". It cannot say "this other
+    figure is right", because it cannot see that the evidence came from the
+    wrong table.
+    """
+
+    def test_the_message_contains_no_digits_at_all(self):
+        import re
+        self.assertIsNone(
+            re.search(r"\d", REFUTED_MESSAGE),
+            "the suppression message must not contain a number — not the "
+            "fabricated one and not the retrieved one",
+        )
+
+    def test_the_message_does_not_leak_either_figure(self):
+        self.assertNotIn("2,014", REFUTED_MESSAGE)
+        self.assertNotIn("2014", REFUTED_MESSAGE)
+        self.assertNotIn("1,916", REFUTED_MESSAGE)
+
+    def test_the_message_tells_the_user_what_to_do(self):
+        """"Something went wrong" sends the user away with nothing."""
+        self.assertIn("college office", REFUTED_MESSAGE.lower())
+
+    def test_the_refutation_string_is_for_operators_not_users(self):
+        """It names both figures, so it must never be what the user sees."""
+        result = try_fast_check(
+            "How many faculty are in the Computer Science department?",
+            "There are 2,014 faculty in the Computer Science department.",
+            sql_result=type("R", (), {
+                "rows": [{"count": 2}], "columns": ["count"],
+                "error": None, "generated_sql": "SELECT 1",
+            })(),
+        )
+        self.assertTrue(result.refuted)
+        self.assertIn("2", result.refutation)
+        self.assertNotEqual(result.refutation, REFUTED_MESSAGE)
