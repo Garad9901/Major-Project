@@ -298,6 +298,56 @@ services:
       - college_rag_net
     logging: *default-logging
 
+  # ============================================================================
+  # UNATTENDED BACKUPS
+  # ============================================================================
+  # The documented procedure used to be "add a line to crontab". The production
+  # audit then found the entry had never been installed, and
+  # verify_deployment.sh has failed on stale backups ever since. A manual step
+  # is indistinguishable, from outside, from a forgotten one — and a product a
+  # stranger installs cannot depend on them remembering.
+  #
+  # Uses the SAME image as postgres, so pg_dump is guaranteed to match the
+  # server version. A pg_dump older than the server refuses to run at all.
+  #
+  # NO DOCKER SOCKET. scripts/backup.sh shells out to `docker compose exec`,
+  # which from inside a container would need /var/run/docker.sock — effectively
+  # root on the host, in exchange for a cron replacement. This talks to Postgres
+  # over the internal network and to Qdrant over HTTP, needing no privilege
+  # beyond reaching two services it already shares a network with.
+  #
+  # scripts/backup.sh is unchanged and remains the operator's manual tool.
+  backup:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.postgres
+    restart: always
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-college_rag}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-college_docs}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      # 14 days of daily backups. Long enough to notice a corruption that took a
+      # week to surface; short enough that the disk does not fill silently.
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/scheduled_backup.sh:/usr/local/bin/scheduled_backup.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/scheduled_backup.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - college_rag_net
+    logging: *default-logging
+
   backend:
     build:
       context: ./backend
