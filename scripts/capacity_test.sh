@@ -218,6 +218,27 @@ run_wave() {
 	done
 	rm -rf "$WORK"
 
+	# A MINIMUM SAMPLE COUNT, INDEPENDENT OF OBSERVED SPREAD.
+	#
+	# The spread check below is ONE-SIDED: it fires only when variance is
+	# actually observed. A short run that happens to miss a rare slow case
+	# reports a tight range and passes in silence — which is exactly the trap we
+	# fell into ourselves.
+	#
+	# Measuring our own hardware, one allocation produced a slow outlier in
+	# 1 of 8 samples. At that rate THREE samples miss it 67% of the time —
+	# (7/8)^3 — so a clean-looking three-sample range is not evidence of
+	# stability, it is the absence of a measurement. We had shipped a default
+	# chosen on exactly that basis.
+	#
+	# So: below MIN_SAMPLES the figure is refused rather than qualified. A
+	# warning next to a number still leaves a number to quote.
+	MIN_SAMPLES="${MIN_SAMPLES:-8}"
+	UNDERSAMPLED=""
+	if [ "$OK" -lt "$MIN_SAMPLES" ]; then
+		UNDERSAMPLED="yes"
+	fi
+
 	SPREAD_NOTE=""
 	if [ "$FASTEST" -gt 0 ] && [ "$((SLOWEST * 10 / FASTEST))" -gt 15 ]; then
 		SPREAD_NOTE="  <-- SPREAD EXCEEDS 1.5x; the mean is NOT a reliable figure"
@@ -229,7 +250,20 @@ run_wave() {
 	echo "    failed        : $ERR"
 	echo "    mean answer   : ${MEAN}s (over the answered ones)"
 	echo "    range         : ${FASTEST}s - ${SLOWEST}s${SPREAD_NOTE}"
-	if [ -n "$SPREAD_NOTE" ]; then
+	if [ -n "$UNDERSAMPLED" ]; then
+		echo
+		echo "    *** NOT A PUBLISHABLE FIGURE: only $OK answers completed, and this"
+		echo "        script will not present a capacity number below $MIN_SAMPLES."
+		echo
+		echo "        A tight range over a handful of samples is not evidence of"
+		echo "        stability — it is the absence of a measurement. On our own"
+		echo "        hardware one configuration produced a slow outlier in 1 of 8"
+		echo "        samples; three samples would have missed it 67% of the time"
+		echo "        and reported a clean range. We shipped a default on exactly"
+		echo "        that mistake."
+		echo
+		echo "        Re-run with USERS=$MIN_SAMPLES or more."
+	elif [ -n "$SPREAD_NOTE" ]; then
 		echo "                    Re-run with more USERS, or quote the range rather"
 		echo "                    than the mean. A wide spread usually means the"
 		echo "                    machine is contended or thermally throttling."

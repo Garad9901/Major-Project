@@ -65,6 +65,76 @@ POSTGRES_PASSWORD="$(random_secret 32)"
 RAG_AGENT_RO_PASSWORD="$(random_secret 32)"
 STAFF_PASSWORD="$(random_secret 24)"
 
+# --- derive the inference CPU allocation from THIS machine ---------------------
+#
+# OLLAMA_CPU_LIMIT USED TO BE A LITERAL, AND A LITERAL IS THE WRONG SHAPE FOR IT.
+#
+# We swept CPU allocations on the development machine and found a clear knee, an
+# odd-allocation degradation and an E-core effect (docs/SCALING.md). Every one of
+# those is an artefact of a HYBRID LAPTOP CHIP behind a synthetic VM topology. A
+# college on a Xeon or EPYC has homogeneous cores and none of it applies; on a
+# 64-core server any of our numbers is absurd, and on a 4-core box impossible.
+#
+# What survives the move to other hardware is not a value, it is a rule:
+#
+#     past the physical core count, additional cores buy almost nothing for
+#     generation — size on memory bandwidth, not cores
+#
+# So the allocation is computed here, on the machine it will run on.
+derive_cpu_allocation() {
+	# Logical CPUs the OS will admit to.
+	_logical=$(nproc 2>/dev/null || echo 4)
+
+	# PHYSICAL cores, which is the number the rule is about. lscpu gives it
+	# directly; without lscpu, assume SMT and halve, which is right on almost
+	# every server sold in the last decade and errs on the safe side when wrong.
+	_physical=""
+	if command -v lscpu >/dev/null 2>&1; then
+		_cps=$(lscpu 2>/dev/null | awk -F: '/^Core\(s\) per socket/ {gsub(/ /,"",$2); print $2}')
+		_sockets=$(lscpu 2>/dev/null | awk -F: '/^Socket\(s\)/ {gsub(/ /,"",$2); print $2}')
+		if [ -n "$_cps" ] && [ -n "$_sockets" ]; then
+			_physical=$((_cps * _sockets))
+		fi
+	fi
+	[ -n "$_physical" ] || _physical=$((_logical / 2))
+	[ "$_physical" -ge 1 ] || _physical=1
+
+	# Target the physical core count: that is where the knee was, and past it
+	# generation gains little.
+	_target="$_physical"
+
+	# Leave the rest of the stack room. Measured on the reference deployment,
+	# every non-inference service TOGETHER idles at under 3.4% of one core and
+	# ~350 MB — so reserving two logical CPUs is already heavy
+	# overprovisioning, not a tight fit.
+	_ceiling=$((_logical - 2))
+	[ "$_ceiling" -lt 1 ] && _ceiling=1
+	[ "$_target" -gt "$_ceiling" ] && _target="$_ceiling"
+
+	# PREFER AN EVEN ALLOCATION. The single odd allocation we tested (11)
+	# degraded generation to 3.04 tok/s against 6.91 and 7.92 at its even
+	# neighbours, in 8 of 8 samples. One data point is not a law, and this is
+	# not claimed as one — but rounding down to even costs nothing, so take the
+	# free option.
+	if [ "$((_target % 2))" -ne 0 ] && [ "$_target" -gt 2 ]; then
+		_target=$((_target - 1))
+	fi
+
+	# Floor. Below 4 the model is slower than the read timeout on CPU and
+	# questions fail rather than merely crawl. If the machine cannot give 4,
+	# that is a hardware answer, not a tuning one.
+	if [ "$_target" -lt 4 ]; then
+		_target=4
+		DERIVE_WARNING="only ${_logical} logical CPUs detected — inference is allocated 4, which this machine may not be able to honour. Expect timeouts; see docs/SCALING.md."
+	fi
+
+	CPU_ALLOCATION="$_target"
+	CPU_DETECTED="${_physical} physical / ${_logical} logical"
+}
+
+DERIVE_WARNING=""
+derive_cpu_allocation
+
 # --- create the file private, THEN write --------------------------------------
 umask 077
 : > "$OUT"
@@ -228,16 +298,25 @@ OLLAMA_READ_TIMEOUT=240
 #
 # If you raise OLLAMA_CPU_LIMIT, raise this to match. If you lower it, lower
 # this. They must agree.
-OLLAMA_NUM_THREAD=8
+OLLAMA_NUM_THREAD=$CPU_ALLOCATION
 
-# Must equal OLLAMA_NUM_THREAD above. Raised from 4 to 8 on measured grounds
-# (docs/SCALING.md, 22 Aug 2026): 4 sat BELOW the throughput knee and was the
-# least reproducible point on the curve, with a 2.7x spread between identical
-# runs. 8 is past the knee and the tightest of the post-knee points.
+# DERIVED FROM THIS MACHINE ($CPU_DETECTED), not copied from ours.
 #
-# On YOUR hardware the knee will be somewhere else. Run
-# scripts/capacity_test.sh before trusting either number.
-OLLAMA_CPU_LIMIT=8.0
+# The rule, which is what transfers between machines: past the physical core
+# count, additional cores buy almost nothing for GENERATION, because generation
+# is limited by memory bandwidth rather than compute. Prefill does keep scaling.
+# So this targets the physical core count, leaves two logical CPUs for the rest
+# of the stack, and prefers an even allocation.
+#
+# MUST STAY EQUAL TO OLLAMA_NUM_THREAD. A docker CPU limit is a quota, not a
+# core count: nproc inside the container still reports every host thread, so a
+# mismatch makes llama.cpp oversubscribe the quota and inference collapses
+# (measured 34x slower). verify_deployment.sh fails a deployment where they
+# disagree.
+#
+# If you are sizing a server for this workload, ask about MEMORY CHANNELS AND
+# SPEED before core count. Run scripts/capacity_test.sh on the candidate machine.
+OLLAMA_CPU_LIMIT=$CPU_ALLOCATION.0
 
 # The model used for the fact-checking pass ONLY.
 #
@@ -292,6 +371,13 @@ echo "    RAG_AGENT_RO_PASSWORD   (32 chars)"
 echo "    STAFF_PASSWORD          (24 chars)"
 echo
 echo "No secret has been printed. Open the file to read them."
+echo
+echo "Inference CPU allocation derived from this machine ($CPU_DETECTED):"
+echo "    OLLAMA_CPU_LIMIT=$CPU_ALLOCATION.0   OLLAMA_NUM_THREAD=$CPU_ALLOCATION"
+if [ -n "$DERIVE_WARNING" ]; then
+	echo
+	echo "WARNING: $DERIVE_WARNING"
+fi
 echo
 echo "NEXT — you must edit 3 placeholders before the backend will start:"
 grep -n 'CHANGEME-SERVER-ADDRESS' "$OUT" | sed 's/^/    line /' || true

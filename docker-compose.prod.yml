@@ -263,7 +263,11 @@ services:
           # Inference is the workload this server exists for, so Ollama is given
           # the most CPU.
           #
-          # RAISED FROM 4.0 TO 8.0, from the sweep in docs/SCALING.md
+          # FALLBACK ONLY. scripts/generate_secrets.sh DERIVES this from the
+          # machine it runs on and writes it into .env.production; this literal
+          # applies only when nothing was derived.
+          #
+          # 12.0 from the equal-n sweep in docs/SCALING.md
           # (22 Aug 2026). 4.0 looked inherited rather than derived, and it is
           # the same value that produced the 34x oversubscription failure. Three
           # measured reasons, none of them speculative:
@@ -288,7 +292,7 @@ services:
           # On a different machine the knee will be elsewhere. Run
           # scripts/capacity_test.sh on the target server rather than inheriting
           # this number.
-          cpus: "${OLLAMA_CPU_LIMIT:-8.0}"
+          cpus: "${OLLAMA_CPU_LIMIT:-12.0}"
 
   ollama-pull:
     logging: *default-logging

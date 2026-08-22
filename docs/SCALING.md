@@ -410,3 +410,62 @@ measured to the same standard as 12.
 **If the number matters on your hardware, run the sweep at equal n.** On this
 machine the evidence currently points at 12 rather than 8, and the honest
 statement is that the two have not been compared fairly.
+
+---
+
+## Equal-n comparison, and why the answer is a rule rather than a number
+
+`OLLAMA_CPU_LIMIT=8` had been chosen on **n=3**. That was not a finding of
+stability — it was the absence of a measurement. Having observed a slow mode in
+**1 of 8** samples at an even allocation, three samples miss it **67%** of the
+time, `(7/8)³`. So the shipped default rested on a run too short to see the
+failure mode we had just demonstrated exists.
+
+Re-measured at **n=8**, all four allocations:
+
+| CPUs | n | prefill median | gen median | gen range | spread | samples < 6.0 |
+|---|---|---|---|---|---|---|
+| 8 | 8 | 32.3 | 6.30 | 5.19–6.63 | 1.28× | **2/8** |
+| 10 | 8 | 33.0 | 6.91 | 1.94–7.44 | 3.84× | 1/8 |
+| 11 | 8 | 34.2 | 3.04 | 2.31–5.56 | 2.41× | 8/8 |
+| **12** | 8 | **35.7** | **7.92** | 7.23–8.19 | **1.13×** | **0/8** |
+
+**8 was not clean.** At n=8 its spread is 1.28× with two samples below 6.0 —
+the original 1.17× over three draws was under-sampling, exactly as predicted.
+
+**12 wins on every axis**: highest prefill, highest generation (**+25.8%** over
+8), tightest spread, and the only allocation with **no** low sample in 8 draws.
+
+### But 12 is not the recommendation, because a literal is the wrong shape
+
+Everything distinctive in this data — the knee at the P-core count, the
+odd-allocation degradation, the low mode — is an artefact of a **hybrid laptop
+chip behind a synthetic VM topology**. A college on a Xeon or EPYC has
+homogeneous cores and none of it applies. On a 64-core server both 8 and 12 are
+absurd; on a 4-core box both are impossible.
+
+**The durable finding is a rule:**
+
+> Past the physical core count, additional cores buy almost nothing for
+> generation. Size on **memory bandwidth**, not cores.
+
+`scripts/generate_secrets.sh` now derives `OLLAMA_CPU_LIMIT` on the machine it
+runs on: target the physical core count, leave two logical CPUs for the rest of
+the stack, prefer an even allocation, floor at 4 with a warning. 12 remains only
+as the fallback literal in `docker-compose.prod.yml`, for the case where nothing
+was derived.
+
+### A worked example of why you run the test rather than trust the rule
+
+On this machine the derivation produces **10**, while measurement prefers **12**.
+
+The rule is not wrong; **it is being fed a lie about the hardware**. `lscpu`
+inside the VM reports 11 physical cores — a synthetic figure. The real host has
+16 (6 P + 8 E + 2 LP-E). The derivation targets 11, rounds to even, and lands on
+10, which measured a 3.84× spread.
+
+On real server hardware `lscpu` reports true topology and the rule should land
+correctly. This machine is precisely the case it cannot handle — which is the
+argument for `scripts/capacity_test.sh` rather than any formula:
+
+**derive a starting point, then measure it.**
