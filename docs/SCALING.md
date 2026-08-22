@@ -341,3 +341,72 @@ these three grounds even if 11 turns out to have been a sampling artefact.
 
 This is a recommendation about *this* curve, on this machine. Run
 `scripts/capacity_test.sh` on the target server.
+
+---
+
+## Discriminating the 11-CPU outlier — 22 August 2026
+
+**Verdict: topological, not sampling.** The retracted E-core explanation is
+replaced by a measured one.
+
+**Method.** Allocations 10, 11, 12 — 11 is the only odd point, its neighbours
+are both SMT-aligned. **8 samples each**, because a 2.7× spread does not support
+a median of three. Container started once per allocation with every call
+carrying a unique prefix, so the prefix cache never hits and each sample
+measures compute rather than cache.
+
+| CPUs | n | prefill median | range | generation median | range | spread |
+|---|---|---|---|---|---|---|
+| 10 | 8 | 33.0 | 28.3–35.2 | **6.91** | 1.94–7.44 | 3.8× |
+| **11** | 8 | 34.2 | 32.5–35.0 | **3.04** | 2.31–5.56 | 2.4× |
+| 12 | 8 | 35.7 | 33.8–36.4 | **7.92** | 7.23–8.19 | 1.1× |
+
+### It is not sampling
+
+If the 11-CPU figure were a bimodal distribution badly summarised by three
+draws, more samples would surface the high mode. They do not:
+
+- **0 of 8 samples at 11 exceed 6.0 tok/s.**
+- **15 of 16 samples at 10 and 12 do.**
+- 11's best sample (5.56) sits below its neighbours' median (7.38). The
+  distributions do not overlap at the top.
+
+Eight consecutive draws landing in the low mode is not a summary artefact.
+
+### It is specific, in two ways that matter
+
+**Only generation is affected.** Prefill at 11 is 34.2 median with the tightest
+range of the three (32.5–35.0) — indistinguishable from its neighbours. Whatever
+degrades generation leaves prompt reading alone.
+
+**Only the odd allocation is affected.** Both even neighbours are clean, and 12
+is the best point measured anywhere in either sweep.
+
+11 CPUs is the only allocation in either sweep that cannot be expressed as whole
+SMT sibling pairs; `--cpuset-cpus 0-10` necessarily leaves one logical CPU whose
+sibling is outside the set. That is consistent with the observation and is
+**stated as consistent, not proven** — confirming the mechanism would need
+per-thread placement data the VM does not expose.
+
+### One honest complication
+
+The 10-CPU run produced a single low sample (1.94) in 8. So the low mode is not
+exclusive to odd allocations — it is merely **rare** there (1 in 8) and
+**universal** at 11 (8 in 8). Recorded rather than smoothed away: it means this
+is a tendency, not a switch, and it is another reason no figure from this
+machine should be quoted as a specification.
+
+### Consequence for the recommendation
+
+**12 CPUs is the best point measured in either sweep** — highest generation
+(7.92), highest prefill (35.7) and by far the tightest spread (1.1×).
+
+The shipped default stays **8** for now, and the reason is that the comparison
+is not like-for-like: 8 rests on **n=3** while 12 rests on **n=8**. 8's
+generation spread was 1.17×, under the 1.5× threshold at which a median of three
+stops being meaningful, so its figure is defensible — but it has not been
+measured to the same standard as 12.
+
+**If the number matters on your hardware, run the sweep at equal n.** On this
+machine the evidence currently points at 12 rather than 8, and the honest
+statement is that the two have not been compared fairly.
