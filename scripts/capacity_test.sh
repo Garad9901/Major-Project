@@ -157,10 +157,25 @@ ask_one() {
 		-H "Content-Type: application/json" -H "X-CSRFToken: $CSRF" \
 		-H "Referer: $SERVER_URL/" -d "{\"question\":$1}" 2>/dev/null || echo 000)
 	E=$(date +%s)
-	if grep -q '"error"' "$2.body" 2>/dev/null; then
-		if grep -qi 'busy' "$2.body" 2>/dev/null; then R=busy; else R=error; fi
-	elif [ "$CODE" = "200" ]; then R=ok
-	else R=http$CODE
+	# CLASSIFY ON THE `done` EVENT, NOT ON THE STRING "error".
+	#
+	# This used to test `grep -q '"error"'`, which matched EVERY SUCCESSFUL
+	# ANSWER. The done event carries the per-stage timing profile, and each
+	# stage records its error field — so a perfectly good response contains
+	#
+	#     "error": null
+	#
+	# twice. Run against a working system this script reported 0 served and
+	# every user failed. It was the measuring instrument that was broken, which
+	# is the worst place for a bug of this kind: a buyer would have concluded
+	# their server could not answer anything.
+	#
+	# The stream ends with `event: done` only when an answer completed. That is
+	# the signal.
+	if grep -q '^event: done' "$2.body" 2>/dev/null; then R=ok
+	elif grep -qi 'busy' "$2.body" 2>/dev/null; then R=busy
+	elif [ "$CODE" != "200" ]; then R=http$CODE
+	else R=error
 	fi
 	echo "$R $((E - S))" > "$2"
 	rm -f "$2.body"
