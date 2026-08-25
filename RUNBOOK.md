@@ -244,7 +244,24 @@ docker compose exec -T backend  python manage.py test    # 291 tests, ~50s  (DEV
 docker compose exec -T frontend npm test                 # 102 assertions, ~2s
 ```
 
+```bash
+sh scripts/test_generate_secrets.sh                      # 12 cases, ~1s  (no stack needed)
+```
+
 > **On a production stack the first command silently does nothing.** See below.
+
+### Deployment-script tests (12 cases)
+
+`scripts/test_generate_secrets.sh` checks the one piece of logic that runs
+exactly once, on a machine we will never see: the derivation of
+`OLLAMA_CPU_LIMIT` from the host's topology. Getting it wrong is not a
+degradation — a quota/thread mismatch measured **34x slower**, which reads as
+broken hardware rather than as a misconfiguration.
+
+It stubs `nproc` and `lscpu` to test machine shapes we cannot obtain
+(dual-socket Xeon, EPYC, no-SMT, missing topology, boxes below the floor), and
+extracts the function from the shipped script rather than restating it, so the
+test cannot drift from the code. Needs no running stack.
 
 ### Backend (291 tests)
 
