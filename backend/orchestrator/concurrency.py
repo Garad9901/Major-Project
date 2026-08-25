@@ -49,9 +49,23 @@ logger = logging.getLogger("orchestrator")
 MAX_CONCURRENCY = int(os.getenv("LLM_MAX_CONCURRENCY", "1"))
 
 # How long a request waits for a slot before being told the assistant is busy.
-# Long enough to absorb the tail of one in-flight answer, short enough that a
-# refusal arrives while the user is still paying attention. Measured answers are
-# 19-22s warm, so 25s covers roughly one full answer ahead in the queue.
+#
+# The intent is: long enough to absorb the tail of one in-flight answer, short
+# enough that a refusal arrives while the user is still paying attention.
+#
+# 25 DOES NOT MEET THAT INTENT, and is kept only because what should replace it
+# is a product decision about how long a student will wait, not an engineering
+# one. This comment previously justified 25 as covering "one full answer ahead"
+# on the basis of 19-22s warm answers. The measured end-to-end p50 over 163 real
+# questions is 28.2s (docs/LATENCY.md), so the second person in the queue is
+# refused BEFORE the answer ahead of them reaches its median completion.
+#
+# A 50-user load test recommended 120 (docs/SCALING.md), but measured only the
+# coalescing-friendly shape -- 50 users over 5 shared questions, ~5 real
+# generations. That does not establish 120 for a room asking different things.
+#
+# Operators should raise this. See docs/CAPACITY.md for how to measure it on
+# your own hardware, which is the only place the number means anything.
 QUEUE_TIMEOUT_SECONDS = float(os.getenv("LLM_QUEUE_TIMEOUT", "25"))
 
 _slots = threading.BoundedSemaphore(MAX_CONCURRENCY)

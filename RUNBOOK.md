@@ -240,20 +240,51 @@ seconds there. They are compensating for CPU-only inference, nothing else.
 Two commands, one per half of the stack. Both must pass before a deploy.
 
 ```bash
-docker compose exec -T backend  python manage.py test    # 191 tests, ~48s
+docker compose exec -T backend  python manage.py test    # 291 tests, ~50s  (DEV STACK ONLY)
 docker compose exec -T frontend npm test                 # 102 assertions, ~2s
 ```
 
-### Backend (191 tests)
+> **On a production stack the first command silently does nothing.** See below.
+
+### Backend (291 tests)
+
+**On a development stack** (`docker compose up`), where the host source is
+bind-mounted over `/app`:
 
 ```bash
 docker compose exec -T backend python manage.py test
 ```
 
+**On a production stack this command reports `NO TESTS RAN` — and that is not
+a pass.** `backend/.dockerignore` excludes `**/tests.py` from the image, so
+there is nothing for the test runner to find:
+
+```
+Found 0 test(s).
+Ran 0 tests in 0.000s
+NO TESTS RAN
+```
+
+That exclusion is deliberate and **must not be relaxed** to make testing
+easier. Mount the source into a throwaway container instead:
+
+```bash
+docker compose --env-file .env.production   -f docker-compose.yml -f docker-compose.prod.yml   run --rm --no-deps -e DJANGO_ENV=development   -v "$(pwd)/backend:/app" -u root backend python manage.py test
+```
+
+Two details in that command are load-bearing, both found by getting them wrong:
+
+* **`-e DJANGO_ENV=development`.** Under production settings
+  `SECURE_SSL_REDIRECT` is on, the Django test client speaks plain HTTP, and
+  **67 tests fail with `301 != 200`**. Those are artefacts of the redirect, not
+  defects — but a first reading of that output looks like a broken release.
+* **`-u root`.** The production image runs as uid 1001; the bind-mounted host
+  source is not writable by it, and `__pycache__` creation fails.
+
 Covers the SQL guard, the prompt-injection fencing, cross-user isolation, the
 login lockout, the web-fetch allowlist, the content sanitiser, conversation
 history handling, degraded-mode behaviour during an outage, and the Ollama
-context-window guards. Takes about 48 seconds.
+context-window guards. Takes about 50 seconds.
 
 ### Frontend (102 assertions)
 

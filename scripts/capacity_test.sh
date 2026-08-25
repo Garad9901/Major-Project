@@ -150,12 +150,12 @@ fi
 CSRF=$(grep csrftoken "$JAR" | awk '{print $7}')
 
 ask_one() {
-	# ask_one <question> <outfile>
+	# ask_one <question> <outfile> <bypass_cache: true|false>
 	S=$(date +%s)
 	CODE=$(curl -sk -o "$2.body" -w '%{http_code}' --max-time 600 \
 		-b "$JAR" -X POST "$SERVER_URL/api/ask/" \
 		-H "Content-Type: application/json" -H "X-CSRFToken: $CSRF" \
-		-H "Referer: $SERVER_URL/" -d "{\"question\":$1}" 2>/dev/null || echo 000)
+		-H "Referer: $SERVER_URL/" \n		-d "{\"question\":$1,\"regenerate\":$3}" 2>/dev/null || echo 000)
 	E=$(date +%s)
 	# CLASSIFY ON THE `done` EVENT, NOT ON THE STRING "error".
 	#
@@ -181,23 +181,89 @@ ask_one() {
 	rm -f "$2.body"
 }
 
+# ------------------------------------------------------------------------------
+# THE DISTINCT-QUESTION POOL — these have to be REAL QUESTIONS.
+#
+# This previously generated "How many faculty are in department number N of the
+# survey?" for each user. That is not a question this dataset can answer:
+# `faculty_development.department` holds plain text ('Engineering', 'Computer
+# Science') and there is no department NUMBER anywhere in the schema.
+#
+# The model duly invented a `department_id` column, the SQL errored, and
+# verification escalated to its slowest LLM path (sql errored -> needs
+# judgement). Answers took 180-200s instead of ~30s. So the pessimal run — THE
+# FIGURE THIS SCRIPT TELLS YOU TO GUARANTEE — was measuring the invalid-question
+# path rather than capacity, and understating the server several-fold.
+#
+# These are genuinely different, genuinely answerable questions across the
+# survey's real dimensions. Nothing coalesces, and every one exercises the path
+# a real user takes.
+# ------------------------------------------------------------------------------
+build_question_pool() {
+	POOL=""
+	for D in Engineering "Computer Science" Science Management Education \n	         "Arts and Humanities" "Social Science" Medicine; do
+		POOL="$POOL|How many faculty are in the $D department?"
+	done
+	for R in Professor "Associate Professor" "Assistant Professor" Lecturer; do
+		POOL="$POOL|How many faculty hold the $R rank?"
+	done
+	for L in Expert Advanced Intermediate Basic; do
+		POOL="$POOL|How many faculty have a competency level of $L?"
+	done
+	for U in Public Private Deemed; do
+		POOL="$POOL|How many faculty records come from $U universities?"
+	done
+	# Cross department x rank, so a USERS=50 run still gets 50 genuinely
+	# distinct questions rather than wrapping around a short pool.
+	for D in Engineering "Computer Science" Science Management Education \n	         "Arts and Humanities" "Social Science" Medicine; do
+		for R in Professor "Associate Professor" "Assistant Professor" Lecturer; do
+			POOL="$POOL|How many $R faculty are in the $D department?"
+		done
+	done
+	POOL_SIZE=$(printf '%s' "$POOL" | tr '|' '
+' | grep -c .)
+}
+build_question_pool
+
+if [ "$USERS" -gt "$POOL_SIZE" ]; then
+	echo "ERROR: USERS=$USERS exceeds the $POOL_SIZE distinct questions available." >&2
+	echo "       Questions would have to repeat, and repeated questions COALESCE:" >&2
+	echo "       the pessimal run would quietly become a partly-realistic one and" >&2
+	echo "       OVERSTATE capacity. Lower USERS, or extend build_question_pool." >&2
+	exit 1
+fi
+
 run_wave() {
 	# run_wave <label> <distinct|repeating>
 	LABEL="$1"; SHAPE="$2"
 	WORK=$(mktemp -d)
 	I=0
 	while [ "$I" -lt "$USERS" ]; do
+		DISTINCT_Q=$(printf '%s' "$POOL" | cut -d'|' -f$((I + 2)))
 		if [ "$SHAPE" = "distinct" ]; then
-			Q="\"How many faculty are in department number $I of the survey?\""
+			Q="\"$DISTINCT_Q\""
+			# BYPASS THE RESPONSE CACHE ON THE PESSIMAL RUN.
+			#
+			# "Pessimal" is DEFINED as nothing hitting the cache. On a first
+			# run distinct questions miss anyway — but on the SECOND run of
+			# this script they are all cached, and the pessimal figure comes
+			# back inflated by the very mechanism the shape excludes. We saw
+			# exactly that: a repeat run reported a 7s mean, which was the
+			# cache answering rather than the server working.
+			#
+			# The realistic run deliberately does NOT bypass: there the cache
+			# and the coalescer are the things under test.
+			BYPASS=true
 		else
 			# REPETITION% of users ask the same question; the rest differ.
 			if [ "$(( (I * 100 / USERS) ))" -lt "$REPETITION" ]; then
 				Q='"How many faculty are in the Computer Science department?"'
 			else
-				Q="\"How many faculty are in department number $I of the survey?\""
+				Q="\"$DISTINCT_Q\""
 			fi
+			BYPASS=false
 		fi
-		ask_one "$Q" "$WORK/$I" &
+		ask_one "$Q" "$WORK/$I" "$BYPASS" &
 		I=$((I + 1))
 	done
 	wait

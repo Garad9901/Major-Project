@@ -469,3 +469,127 @@ correctly. This machine is precisely the case it cannot handle — which is the
 argument for `scripts/capacity_test.sh` rather than any formula:
 
 **derive a starting point, then measure it.**
+
+---
+
+# `LLM_QUEUE_TIMEOUT=25` — where it came from — 25 August 2026
+
+The value governs how long a queued question waits for the single LLM slot
+before the user is told the assistant is busy. With `LLM_MAX_CONCURRENCY=1`,
+capacity is queueing rather than parallelism, so this constant — not the
+hardware — sets how many people a server can serve.
+
+## It has never been edited
+
+```
+$ git log -L 55,55:backend/orchestrator/concurrency.py
+7f5ef68 chore: place the College Assistant under version control
++QUEUE_TIMEOUT_SECONDS = float(os.getenv("LLM_QUEUE_TIMEOUT", "25"))
+```
+
+One commit: the initial one. **25 has been the default since the repository
+existed and was never changed.**
+
+This also disposes of a premise worth correcting explicitly, because it was
+believed for a while during this work: that the default had at some point been
+120 and was later lowered. It never was. `PRODUCTION_AUDIT_REPORT.md` records a
+question refused with *"llm queue timeout after 120s"*, which is a real sighting
+but of the auditor's own shell environment, not of a shipped default. Nothing in
+the repository has ever defaulted to 120.
+
+## But it was not arbitrary either — and that is the actual finding
+
+The constant carries a justification, in `backend/orchestrator/concurrency.py`:
+
+> Long enough to absorb the tail of one in-flight answer, short enough that a
+> refusal arrives while the user is still paying attention. Measured answers are
+> 19-22s warm, so 25s covers roughly one full answer ahead in the queue.
+
+The reasoning is sound and the intent is right. **The number it rests on is
+one this project has since measured to be wrong.** `docs/LATENCY.md` puts the
+end-to-end p50 at **28.2 s** over 163 real questions — against the 19–22 s the
+comment assumes:
+
+| | source | n |
+|---|---|---|
+| comment's assumption | 19–22 s warm | a handful of warm single questions |
+| **measured p50** | **28.2 s** | **163 questions** |
+| measured p95 | 197.2 s | |
+
+So the comment's own stated goal — *"covers roughly one full answer ahead in
+the queue"* — **is not met by the value it justifies.** 25 < 28.2. The second
+person in the queue is turned away before the answer ahead of them has reached
+its median completion, let alone its tail. The timeout does the opposite of
+what its comment says it does.
+
+## And the correction was already measured, then never applied
+
+The 50-user load test in this same document found the same thing from the other
+direction, and recommended a fix:
+
+| | served | busy | throughput |
+|---|---|---|---|
+| cache only | 2 | 48 | 2.4/min |
+| + coalescing | 21 | 29 | 18.4/min |
+| **+ tuned queue timeout** | **50** | **0** | **28.1/min** |
+
+> "with coalescing there are only ~5 real jobs, so the 25s queue timeout was
+> mistuned and was refusing leaders that would have succeeded.
+> `LLM_QUEUE_TIMEOUT=120`."
+
+That recommendation reached **no configuration that ships**. Verified today:
+
+| location | value |
+|---|---|
+| `backend/orchestrator/concurrency.py:55` | `25` |
+| `.env.example:111` | `25` |
+| `docker-compose.prod.yml:127` | `${LLM_QUEUE_TIMEOUT:-25}` |
+
+(`docs/SCALING.md:146` shows `LLM_QUEUE_TIMEOUT=30`, but that is inside the
+vLLM-on-GPU migration block, where answers are 10–30× faster. It is a different
+hardware context, not a fourth contradictory value.)
+
+**This is the backup-crontab failure mode again**: a finding that was measured,
+written down, and never made it into the configuration. From inside the running
+system a documented-but-unapplied fix and a forgotten one are the same thing.
+Two occurrences make it a pattern worth a release-gate check — *does every
+recommendation in the docs correspond to a value in a file that ships?*
+
+## What is NOT being changed here, and why
+
+**The default stays at 25 in this commit.** The evidence for 120 is a single
+load test of a *coalescing-friendly* shape — 50 users over 5 common questions,
+where only ~5 requests are real generations. That is the favourable case. It
+does not establish 120 for a room asking different questions, and raising a
+timeout to a value where a user waits two minutes for a refusal is a product
+decision about patience, not an engineering one.
+
+What the evidence does establish is that **25 is not defensible on its stated
+reasoning**, whatever replaces it.
+
+## The honest state of the measurement
+
+A queue-timeout curve — 25 / 60 / 120 / 180 against users served, rejection
+rate and worst-case wait — was started and **is not reported here.** It ran
+inside an ephemeral container that was reclaimed with the raw data in it, and
+the replacement machine has 2 CPUs against the 12 the run used. It is not
+resumable on comparable hardware and is not being reconstructed from memory.
+
+One observation survived, and is recorded as an observation only — **not a
+curve, not a capacity figure**, and not to be quoted as either:
+
+> 12 CPUs, 12 simultaneous users, `LLM_QUEUE_TIMEOUT=25`.
+> All-distinct questions: **5 of 12 answered**, mean 71 s (range 24–118 s).
+> 70 %-repeated questions: **10 of 12 answered**, mean 24 s (range 22–44 s).
+>
+> Single run at each shape. The all-distinct figure was refused by
+> `capacity_test.sh`'s own `MIN_SAMPLES` guard — 5 completions is below the
+> floor for a publishable mean — and the spread exceeds 1.5× in both shapes.
+
+Consistent with the argument above, and with coalescing being the dominant
+effect at this timeout, but **one run is not evidence** and the difference
+between the shapes is exactly what a single sample cannot separate from noise.
+
+`scripts/capacity_test.sh` ships so that a buyer can run this on their own
+hardware, which is the only place the answer is meaningful. See
+`docs/CAPACITY.md` for the method.
