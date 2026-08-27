@@ -6,7 +6,12 @@ from common import ollama
 
 # LLM_MODEL is the single knob for the model all agents use; SYNTHESIS_MODEL is
 # an optional per-agent override that defaults to it.
-SYNTHESIS_MODEL = os.getenv("SYNTHESIS_MODEL", os.getenv("LLM_MODEL", "qwen2.5:7b"))
+# Blank and unset both mean "use the fallback" — os.getenv applies a default
+# only when the name is ABSENT, so a variable set to "" used to resolve to an
+# empty model name despite .env.production telling operators blank was fine.
+SYNTHESIS_MODEL = ollama.model_from_env(
+    "SYNTHESIS_MODEL", ollama.model_from_env("LLM_MODEL", "qwen2.5:7b")
+)
 
 # The ONLY agent whose job is to write prose, so this is the one cap that is
 # generous rather than tight. It exists to bound a runaway generation, not to

@@ -13,7 +13,10 @@ from common import ollama
 #
 # Measured cost of the 7B on this hardware: 5.2-9.1s warm, 60s cold, to emit
 # roughly twenty tokens of JSON.
-ROUTER_MODEL = os.getenv("ROUTER_MODEL", "qwen2.5:3b")
+# Blank and unset both mean "use the fallback" — os.getenv applies a default
+# only when the name is ABSENT, so a variable set to "" used to resolve to an
+# empty model name despite .env.production telling operators blank was fine.
+ROUTER_MODEL = ollama.model_from_env("ROUTER_MODEL", "qwen2.5:3b")
 
 # The output is a single small JSON object. Left uncapped it can ramble a long
 # "reason" string, and every token of it is generated at ~9 tok/s. 80 tokens is

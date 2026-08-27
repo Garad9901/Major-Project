@@ -224,19 +224,41 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
+      # EVERY model variable the application reads is passed through, and the
+      # list of what to pull is DERIVED from them by backend/scripts/required_models.sh
+      # rather than written out again here.
+      #
+      # It used to be a hand-written list of the three below, while the app read
+      # six. ROUTER_MODEL was missing and has its OWN default (qwen2.5:3b, not
+      # LLM_MODEL), so on a default deployment a model the router needs was
+      # never fetched — and common/ollama.py counts it as required-resident, so
+      # /api/health/ reports "loading qwen2.5:3b" and 503s forever. It worked
+      # only because VERIFICATION_MODEL happened to be set to the same value.
+      # See the header of backend/scripts/required_models.sh for the measurements.
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
       LLM_MODEL: ${LLM_MODEL:-qwen2.5:7b}
       # Usually a SMALLER model than LLM_MODEL: verification cannot stream and
       # must read the whole answer plus all evidence, so on CPU it is the
       # slowest step. Pulled here so a fresh server does not fail its first
-      # verification with "model not found". Empty (or equal to LLM_MODEL) is
-      # fine — the loop below skips blanks and re-pulling is a no-op.
+      # verification with "model not found". Empty is fine — blank means "use
+      # LLM_MODEL", and the enumeration deduplicates.
       VERIFICATION_MODEL: ${VERIFICATION_MODEL:-}
+      SYNTHESIS_MODEL: ${SYNTHESIS_MODEL:-}
+      SQL_AGENT_MODEL: ${SQL_AGENT_MODEL:-}
+      ROUTER_MODEL: ${ROUTER_MODEL:-}
+    volumes:
+      # The single source of truth for which models this deployment needs.
+      # backend/common/tests.py fails if it ever disagrees with the readiness
+      # check in common/ollama.py.
+      - ./backend/scripts/required_models.sh:/usr/local/bin/required_models.sh:ro
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        for model in "$$EMBEDDING_MODEL" "$$LLM_MODEL" "$$VERIFICATION_MODEL"; do
-          [ -z "$$model" ] && continue
+        MODELS="$$(sh /usr/local/bin/required_models.sh)"
+        CHAT_MODELS="$$(sh /usr/local/bin/required_models.sh --chat)"
+        echo "This deployment needs: $$(echo $$MODELS | tr '\n' ' ')"
+
+        for model in $$MODELS; do
           echo "Downloading $$model (first run can take several minutes)..."
           n=0
           until ollama pull "$$model"; do
@@ -265,11 +287,7 @@ services:
         # Uses the CLI, not an HTTP call: this image ships neither wget nor
         # curl. A first version used `wget --post-data` and failed silently on
         # every model for exactly that reason.
-        for model in "$$EMBEDDING_MODEL" "$$LLM_MODEL" "$$VERIFICATION_MODEL"; do
-          [ -z "$$model" ] && continue
-          case "$$model" in
-            *embed*) continue ;;   # embedding models take no chat request
-          esac
+        for model in $$CHAT_MODELS; do
           echo "Loading $$model into memory (several minutes on CPU; this is the wait that would otherwise hit your first user)..."
           ollama run "$$model" "hi" >/dev/null 2>&1 || true
         done
@@ -282,8 +300,7 @@ services:
         # ready when it is not — so this checks `ollama ps` and says which
         # models are actually in memory.
         MISSING=""
-        for model in "$$LLM_MODEL" "$$VERIFICATION_MODEL"; do
-          [ -z "$$model" ] && continue
+        for model in $$CHAT_MODELS; do
           ollama ps 2>/dev/null | grep -q "$$model" || MISSING="$$MISSING $$model"
         done
         if [ -n "$$MISSING" ]; then

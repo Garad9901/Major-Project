@@ -6,7 +6,12 @@ from common import ollama
 
 # LLM_MODEL is the single knob for the model all agents use; SQL_AGENT_MODEL is
 # an optional per-agent override that defaults to it.
-SQL_AGENT_MODEL = os.getenv("SQL_AGENT_MODEL", os.getenv("LLM_MODEL", "qwen2.5:7b"))
+# Blank and unset both mean "use the fallback" — os.getenv applies a default
+# only when the name is ABSENT, so a variable set to "" used to resolve to an
+# empty model name despite .env.production telling operators blank was fine.
+SQL_AGENT_MODEL = ollama.model_from_env(
+    "SQL_AGENT_MODEL", ollama.model_from_env("LLM_MODEL", "qwen2.5:7b")
+)
 
 # The output is ONE SELECT statement, or the literal NO_QUERY. Even a join
 # across every allowlisted table does not approach 300 tokens.

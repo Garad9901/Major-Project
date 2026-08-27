@@ -249,20 +249,67 @@ def is_ready(models=None, timeout=3):
     return True, "loaded: " + ", ".join(resident)
 
 
+def model_from_env(name, fallback):
+    """Resolve one model variable, treating BLANK and UNSET alike.
+
+    os.getenv(name, fallback) applies the fallback only when the variable is
+    ABSENT. A variable that is present but empty returns "". Every model
+    override in this system was written that way, while .env.production tells
+    operators the opposite:
+
+        "Leave this blank to use LLM_MODEL for verification too"
+
+    Following that instruction produced an EMPTY model name rather than
+    LLM_MODEL. Verified: VERIFICATION_MODEL= resolves to '' under the old
+    pattern. So blank means "use the fallback", here and in scripts/
+    required_models.sh, which must agree with this function.
+    """
+    value = os.getenv(name, "")
+    return value.strip() or fallback
+
+
 def _configured_models():
     """The models a question can actually reach, from the environment.
+
+    MUST AGREE WITH scripts/required_models.sh, which is what ollama-pull uses
+    to decide what to download. When they disagreed, this function counted
+    ROUTER_MODEL as required-resident while nothing ever fetched it, so
+    /api/health/ reported "loading qwen2.5:3b" and returned 503 forever. That
+    is not a hypothetical: the two only agreed because VERIFICATION_MODEL
+    happened to be set to the same value ROUTER_MODEL defaults to.
+
+    backend/common/tests.py runs the shell script and asserts the two produce
+    the same set, so a future edit to either one fails the suite rather than
+    the deployment.
 
     Read at call time rather than import time so a health check reflects the
     running configuration even if it was changed under a restart.
     """
-    llm = os.getenv("LLM_MODEL", "qwen2.5:7b")
-    return [
-        os.getenv("EMBEDDING_MODEL", "nomic-embed-text"),
+    llm = model_from_env("LLM_MODEL", "qwen2.5:7b")
+
+    models = [
+        model_from_env("EMBEDDING_MODEL", "nomic-embed-text"),
         llm,
-        # Optional per-agent overrides. Only counted when set to something
-        # different, so a deployment that does not use them is not reported as
-        # perpetually warming for a model it never loads.
-        os.getenv("VERIFICATION_MODEL", "") or "",
-        os.getenv("SYNTHESIS_MODEL", "") or "",
-        os.getenv("ROUTER_MODEL", "qwen2.5:3b"),
+        # ROUTER_MODEL DOES NOT FALL BACK TO LLM_MODEL. Routing is a cheap
+        # four-way classification and deliberately defaults to a smaller model,
+        # so on a DEFAULT deployment this is a second model that must be on
+        # disk. That is exactly the one the puller was missing.
+        model_from_env("ROUTER_MODEL", "qwen2.5:3b"),
+        # Per-agent overrides, each defaulting to LLM_MODEL, so they add
+        # nothing unless a deployment actually sets them.
+        model_from_env("VERIFICATION_MODEL", llm),
+        model_from_env("SYNTHESIS_MODEL", llm),
+        # SQL_AGENT_MODEL was absent here entirely. Set to a distinct model it
+        # would have been the mirror of the router bug: readiness reporting
+        # ready while the SQL agent's model was not resident.
+        model_from_env("SQL_AGENT_MODEL", llm),
     ]
+
+    # Deduplicate, preserving order. Several of these resolving to LLM_MODEL is
+    # the normal case, and a duplicate would be reported twice by the readiness
+    # detail and read as two separate problems.
+    seen = []
+    for model in models:
+        if model and model not in seen:
+            seen.append(model)
+    return seen

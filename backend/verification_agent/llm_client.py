@@ -4,7 +4,7 @@ import os
 
 import requests
 
-from common import llm_metrics
+from common import llm_metrics, ollama
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
 
@@ -24,7 +24,12 @@ _READ_TIMEOUT = float(os.getenv("OLLAMA_READ_TIMEOUT", "120"))
 _TIMEOUT = (_CONNECT_TIMEOUT, _READ_TIMEOUT)
 # LLM_MODEL is the single knob for the model all agents use; VERIFICATION_MODEL
 # is an optional per-agent override that defaults to it.
-VERIFICATION_MODEL = os.getenv("VERIFICATION_MODEL", os.getenv("LLM_MODEL", "qwen2.5:7b"))
+# Blank and unset both mean "use the fallback" — os.getenv applies a default
+# only when the name is ABSENT, so a variable set to "" used to resolve to an
+# empty model name despite .env.production telling operators blank was fine.
+VERIFICATION_MODEL = ollama.model_from_env(
+    "VERIFICATION_MODEL", ollama.model_from_env("LLM_MODEL", "qwen2.5:7b")
+)
 
 # Output caps. Both of these bound GENERATION, which is the expensive half at
 # ~9 tok/s — they do not bound how much the model reads.
