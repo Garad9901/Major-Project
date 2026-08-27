@@ -163,7 +163,7 @@ alias dcp='docker compose --env-file .env.production -f docker-compose.yml -f do
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml logs -f ollama-pull
 ```
 
-Wait for `All AI models are ready.` This happens once.
+Wait for `All AI models are downloaded AND resident.` This happens once.
 
 ### If the backend refuses to start
 
@@ -186,7 +186,7 @@ docker compose --env-file .env.production -f docker-compose.yml -f docker-compos
 
 ## Step 5 — Create accounts
 
-Real accounts replace the bootstrap `staff` login.
+Real accounts replace the bootstrap login (`STAFF_USERNAME`, `admin` on a generated production config).
 
 **One person:**
 ```
@@ -233,11 +233,23 @@ distributed** — `shred -u roster.csv.credentials.csv` on the host.
 Every account starts with `must_change_password`, so the initial password works
 exactly once — the user must set their own before they can ask anything.
 
-**Then disable the bootstrap account:**
+**Then disable the bootstrap account.** Its name is whatever `STAFF_USERNAME`
+was set to — `generate_secrets.sh` writes `admin`, and `staff` is only the
+default on the trial path. Read it from the file rather than assuming:
+
 ```
+BOOTSTRAP=$(grep '^STAFF_USERNAME=' .env.production | cut -d= -f2-)
+echo "bootstrap account: ${BOOTSTRAP:-staff}"
+
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml \
-  exec backend python manage.py disable_user staff
+  exec backend python manage.py disable_user "${BOOTSTRAP:-staff}"
 ```
+
+> This step used to say `disable_user staff` literally. On a generated
+> production configuration that returns "no such user" — so the command
+> appeared to have been run, the checklist item below got ticked, and the
+> real `admin` account stayed enabled with a password that everyone who
+> touched the deployment had read. Confirm you see "disabled", not an error.
 
 > **Why:** the bootstrap password came out of a file that whoever deployed the
 > server has read, so it is a shared secret from the moment it exists. Once real
@@ -372,7 +384,7 @@ Tick every line before giving any student the address.
 - [ ] Secrets recorded in the institute's password manager
 
 ### Access
-- [ ] Bootstrap `staff` account **disabled**
+- [ ] Bootstrap account (`STAFF_USERNAME`, normally `admin`) **disabled** — and the command reported "disabled", not "no such user"
 - [ ] Real accounts created; a test user has completed a forced password change
 - [ ] `roster.csv.credentials.csv` securely deleted after distribution
 - [ ] Confirmed a **student** account can ask a question, and that its answers

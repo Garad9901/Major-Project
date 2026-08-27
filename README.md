@@ -101,7 +101,7 @@ To watch the download progress:
 ```
 docker compose logs -f ollama-pull
 ```
-When you see **`All AI models are ready.`**, press `Ctrl + C` to stop watching. The assistant
+When you see **`All AI models are downloaded AND resident.`**, press `Ctrl + C` to stop watching. The assistant
 is now ready.
 
 ### 6. Open the website
@@ -253,7 +253,7 @@ it's running, then try again.
 
 **The website won't load / says it can't connect**
 The AI models may still be downloading on first startup. Check with
-`docker compose logs -f ollama-pull` and wait for `All AI models are ready.`
+`docker compose logs -f ollama-pull` and wait for `All AI models are downloaded AND resident.`
 
 **A question returns an error**
 If it's the first startup, the models may not be ready yet — wait for the download to finish.

@@ -88,7 +88,7 @@ Work down the list — the fixes get more drastic, so try them in order.
 1. Is Docker Desktop running? Open it and wait for "Docker Desktop is running."
 2. Run `docker compose ps`. If nothing is listed, run `docker compose up -d`.
 3. If this is the first start ever, the AI models are still downloading. Watch
-   `docker compose logs -f ollama-pull` and wait for `All AI models are ready.`
+   `docker compose logs -f ollama-pull` and wait for `All AI models are downloaded AND resident.`
 
 **The browser says "your connection is not private"**
 Expected and safe on your own network. Click **Advanced → Proceed**. To stop it happening on
