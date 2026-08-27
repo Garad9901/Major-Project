@@ -241,3 +241,40 @@ never overwrite real records.
 
 **Never enable it on a server holding real student data.** It contains 13,000
 invented faculty records, and the assistant would state them as fact.
+
+---
+
+## Correcting a record that is already live
+
+Re-import the corrected file. The importer matches on each entity's natural
+key, so a corrected row **updates** rather than duplicating.
+
+**One thing to know about, because it decides what students actually see.**
+Answers are cached for `RESPONSE_CACHE_TTL_SECONDS` (default 30 minutes), and
+they are matched **semantically** — so a student rephrasing the question does
+*not* escape a stale entry. Correct a fee and, without clearing the cache,
+people keep being told the old figure by a system whose whole claim is that it
+answers from the records.
+
+**A successful `--apply` clears it for you** and says so:
+
+```
+  Cached answers cleared — the next question is answered from the new records.
+```
+
+If Redis is unreachable the import still succeeds — it is already committed —
+but the clearing cannot be signalled, and the importer says that instead of
+claiming success. Run it yourself once Redis is back:
+
+```bash
+docker compose exec -T backend python manage.py clear_answer_cache --reason "fee correction"
+```
+
+You can also run that at any time, after correcting data by any route the
+importer was not involved in.
+
+> **Why a command and not a restart.** `docker compose up -d --force-recreate
+> backend` also clears it, by throwing the process away. That works, but it
+> drops in-flight answers and is a strange thing to do after a routine
+> correction. The command signals every serving process instead, and returns
+> non-zero if it could not — so a provisioning script can branch on it.

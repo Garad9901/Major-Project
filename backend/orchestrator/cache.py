@@ -27,20 +27,33 @@ CORRECTNESS: WHAT IS DELIBERATELY *NOT* CACHED
     would keep serving that after it came back.
   * empty answers.
 
-STALENESS, STATED HONESTLY
-There is NO automatic invalidation when the underlying data changes. The cache
-lives in the backend process; `load_faculty_dataset` runs in a separate
-`manage.py` process and cannot reach it. So after a data load, answers can be up
-to RESPONSE_CACHE_TTL_SECONDS old (default 30 minutes).
+STALENESS, AND WHY INVALIDATION CANNOT BE A FUNCTION CALL
+The entries live in THIS PROCESS. `manage.py` runs in a different one, so a
+management command that calls invalidate() clears its own empty cache, reports
+success, and leaves the serving worker untouched. Measured on the running stack:
 
-That bound is the whole safety argument, so keep the TTL short. To clear it
-immediately after loading data, recreate the backend:
+    ask #1 (cold)                                60 s
+    a separate process reports                    0 entries
+    ask #2                                        1 s   <- worker HAS it cached
+    invalidate() from a separate process   "cleared 0 entries"
+    ask #3                                        0 s   <- still served stale
 
-    docker compose up -d --force-recreate backend
+That is why invalidation goes through a GENERATION TOKEN in Redis instead. Any
+process can bump it; every serving process notices on its next lookup and drops
+everything. It costs one Redis read per lookup, which is sub-millisecond against
+a ~28 s answer, and it keeps working unchanged if this ever runs on more than
+one worker.
 
-A shared cache (Redis) would fix this properly and is the right answer if this
-ever runs on more than one worker — the current cache is per-process, so N
-workers means N independent caches and N times the miss rate.
+WHY THIS MATTERS MORE THAN A CACHE USUALLY DOES: answers are matched
+SEMANTICALLY, so a rephrased question hits the same entry. Correct a fee or a
+deadline in the records and, without invalidation, students keep being told the
+old figure for up to RESPONSE_CACHE_TTL_SECONDS — by a system whose whole claim
+is that it answers from the records.
+
+IF REDIS IS UNREACHABLE the cache FAILS CLOSED: it stops serving and stops
+storing, rather than serving answers it cannot prove are current. This costs
+nothing in practice, because sessions live in Redis too — if Redis is down,
+nobody is signed in to be served a stale answer.
 
 THRESHOLD
 0.95 cosine, as specified. That is deliberately strict. "How many faculty in
@@ -55,6 +68,7 @@ import os
 import re
 import threading
 import time
+import uuid
 
 logger = logging.getLogger("orchestrator")
 
@@ -77,6 +91,97 @@ _lock = threading.Lock()
 _entries = []          # newest last: [{question, norm, vector, answer, route, ts}]
 _exact = {}            # norm -> index into _entries
 _stats = {"hits_exact": 0, "hits_semantic": 0, "misses": 0, "stores": 0, "evictions": 0}
+
+# ==============================================================================
+# CROSS-PROCESS INVALIDATION
+# ==============================================================================
+# A shared token that every serving process compares against what it last saw.
+# Bumping it is how a DIFFERENT process (an importer, a management command)
+# tells this one that the records changed.
+#
+# A random token rather than a counter: `incr` needs the key to exist and races
+# when several processes try to create it, whereas any CHANGE of an opaque value
+# means the same thing here — "not what you last saw".
+_GENERATION_KEY = "answer_cache:generation"
+
+# What this process last observed. None = never checked.
+_generation = None
+
+
+def _shared():
+    """Django's Redis cache, imported lazily so this module stays importable
+    without settings configured (several tests and tools rely on that)."""
+    from django.core.cache import cache as shared_cache
+    return shared_cache
+
+
+def bump_generation(reason=""):
+    """Signal every serving process that cached answers are now stale.
+
+    Safe to call from ANY process — that is the entire point. Returns the new
+    token, or None if Redis could not be reached (in which case nothing was
+    signalled and the caller must say so rather than report success).
+    """
+    token = uuid.uuid4().hex
+    try:
+        # timeout=None means never expire. An expiring key would look like a
+        # change to every process at once and clear every cache for no reason.
+        _shared().set(_GENERATION_KEY, token, timeout=None)
+    except Exception:
+        logger.error(
+            "could not bump the cache generation (Redis unreachable) reason=%s — "
+            "CACHED ANSWERS HAVE NOT BEEN CLEARED", reason or "unspecified",
+            exc_info=True,
+        )
+        return None
+    logger.info("cache generation bumped to %s reason=%s", token[:8], reason or "unspecified")
+    return token
+
+
+def _check_generation():
+    """Drop everything if another process bumped the token.
+
+    Returns True when the cache may be used, False when freshness cannot be
+    established and the caller must bypass the cache entirely.
+    """
+    global _generation
+    try:
+        current = _shared().get(_GENERATION_KEY)
+    except Exception:
+        # FAIL CLOSED. We cannot show that these answers reflect the current
+        # records, so we do not serve them. See the module docstring.
+        logger.warning(
+            "cache: cannot read the generation token — bypassing the cache "
+            "rather than risk serving stale answers", exc_info=True,
+        )
+        return False
+
+    if current is None:
+        # No token yet. Claim it without clobbering a racing process, then read
+        # back whatever actually won so every process agrees.
+        try:
+            _shared().add(_GENERATION_KEY, uuid.uuid4().hex, timeout=None)
+            current = _shared().get(_GENERATION_KEY)
+        except Exception:
+            logger.warning("cache: cannot initialise the generation token", exc_info=True)
+            return False
+
+    if _generation is None:
+        _generation = current
+        return True
+
+    if current != _generation:
+        with _lock:
+            n = len(_entries)
+            _entries.clear()
+            _exact.clear()
+            _pending_vectors.clear()
+        _generation = current
+        logger.info(
+            "cache dropped %d entries: the records changed (generation now %s)",
+            n, str(current)[:8],
+        )
+    return True
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 # Tokens that carry no distinguishing meaning for this domain. Everything else
@@ -141,6 +246,12 @@ def lookup(question, embed_fn):
     semantic tier entirely, and so tests need no model.
     """
     if not ENABLED:
+        return None
+
+    # Before trusting anything in here, find out whether another process has
+    # told us the records changed. Returns False when Redis is unreachable, in
+    # which case freshness cannot be established and we do not serve.
+    if not _check_generation():
         return None
 
     norm = _normalise(question)
@@ -214,6 +325,11 @@ def store(question, answer, route, embed_fn, degraded=False):
         return
     if degraded:
         return  # a degraded answer describes a temporary outage, not the data
+
+    # Storing under a stale generation would re-populate the cache with answers
+    # computed before an import, immediately after it was cleared.
+    if not _check_generation():
+        return
 
     norm = _normalise(question)
     vector = _pending_vectors.pop(norm, None)

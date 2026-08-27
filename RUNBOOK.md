@@ -240,7 +240,7 @@ seconds there. They are compensating for CPU-only inference, nothing else.
 Two commands, one per half of the stack. Both must pass before a deploy.
 
 ```bash
-docker compose exec -T backend  python manage.py test    # 291 tests, ~50s  (DEV STACK ONLY)
+docker compose exec -T backend  python manage.py test    # 310 tests, ~95s  (DEV STACK ONLY)
 docker compose exec -T frontend npm test                 # 102 assertions, ~2s
 ```
 
@@ -263,7 +263,7 @@ It stubs `nproc` and `lscpu` to test machine shapes we cannot obtain
 extracts the function from the shipped script rather than restating it, so the
 test cannot drift from the code. Needs no running stack.
 
-### Backend (291 tests)
+### Backend (310 tests)
 
 **On a development stack** (`docker compose up`), where the host source is
 bind-mounted over `/app`:

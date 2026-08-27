@@ -17,6 +17,7 @@ import sys
 from django.core.management.base import BaseCommand, CommandError
 
 from academics import importers
+from orchestrator import cache
 
 
 class Command(BaseCommand):
@@ -85,6 +86,38 @@ class Command(BaseCommand):
             raise CommandError(
                 f"{len(result.errors)} problem(s) found — nothing was written."
             )
+
+        # CLEAR CACHED ANSWERS, because the records they were computed from have
+        # just changed.
+        #
+        # Without this, correcting a fee or a deadline and re-importing leaves
+        # students being told the old figure for up to RESPONSE_CACHE_TTL_SECONDS
+        # — and because answers are matched SEMANTICALLY, rephrasing the question
+        # does not escape the stale entry. That is the worst outcome this system
+        # has: a confident, wrong, specific number.
+        #
+        # Only on a real write. A dry run changed nothing, and clearing the
+        # cache after one would throw away good entries for no reason.
+        if not dry_run and (result.created or result.updated):
+            token = cache.bump_generation(f"import:{entity}")
+            if token is None:
+                # Never claim the cache was cleared when it was not. The import
+                # itself SUCCEEDED and is committed, so this is a warning about
+                # what students will see, not an error about the data.
+                self.stdout.write(self.style.WARNING(
+                    "\n  WARNING: the records were imported, but cached answers "
+                    "could NOT be cleared (Redis unreachable)."
+                ))
+                self.stdout.write(self.style.WARNING(
+                    "  Users may keep receiving pre-import answers for up to "
+                    "RESPONSE_CACHE_TTL_SECONDS. Run `manage.py "
+                    "clear_answer_cache` once Redis is back."
+                ))
+            else:
+                self.stdout.write(
+                    "\n  Cached answers cleared — the next question is answered "
+                    "from the new records."
+                )
 
     def _list(self):
         self.stdout.write("Importable entities:\n")
