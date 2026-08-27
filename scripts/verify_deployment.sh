@@ -182,7 +182,11 @@ fi
 # A mismatch here does not fail visibly — it makes every answer time out while
 # the stack reports itself perfectly healthy, which is how it survived until a
 # production request was actually served. See docs/LATENCY.md, 21 Aug 2026.
-OLLAMA_CPUS="$(docker inspect majorproject3-ollama-1 --format '{{.HostConfig.NanoCpus}}' 2>/dev/null || echo 0)"
+OLLAMA_CID="$($COMPOSE ps -q ollama 2>/dev/null | tr -d '\r')"
+OLLAMA_CPUS=0
+if [ -n "$OLLAMA_CID" ]; then
+	OLLAMA_CPUS="$(docker inspect "$OLLAMA_CID" --format '{{.HostConfig.NanoCpus}}' 2>/dev/null || echo 0)"
+fi
 if [ "${OLLAMA_CPUS:-0}" -gt 0 ] 2>/dev/null; then
 	CPU_COUNT=$(( OLLAMA_CPUS / 1000000000 ))
 	# Read the EFFECTIVE value out of the running backend, not out of a file.
@@ -197,6 +201,9 @@ if [ "${OLLAMA_CPUS:-0}" -gt 0 ] 2>/dev/null; then
 	else
 		green "OLLAMA_NUM_THREAD=${NT} matches the ${CPU_COUNT}-CPU limit on ollama"
 	fi
+else
+	yellow "could not read ollama's CPU quota — thread/quota check SKIPPED"
+	detail "This check silently no-opped on every machine but the author's until 25 Aug 2026. If you see this line, verify OLLAMA_NUM_THREAD by hand against the container's CPU limit before serving anyone."
 fi
 
 if $COMPOSE ps --services 2>/dev/null | grep -qx "frontend"; then
@@ -237,6 +244,50 @@ if [ -n "$KEYLEN" ] && [ "$KEYLEN" -ge 50 ] 2>/dev/null; then
 	green "DJANGO_SECRET_KEY is $KEYLEN characters"
 else
 	red "DJANGO_SECRET_KEY is too short or unreadable (${KEYLEN:-unknown})"
+fi
+
+# --- 4b. the secrets FILE itself ----------------------------------------------
+# Strong secrets in a world-readable file are not secrets. generate_secrets.sh
+# creates .env.production with umask 077 and chmod 600, but the file is edited
+# afterwards (three placeholders must be replaced), copied between machines, and
+# restored from backups — any of which can widen the mode.
+if [ -f .env.production ]; then
+	MODE=$(stat -c '%a' .env.production 2>/dev/null || stat -f '%Lp' .env.production 2>/dev/null || echo "")
+	if [ -z "$MODE" ]; then
+		yellow "could not read the mode of .env.production on this filesystem"
+	else
+		# Anything readable by group or other. 600 and 400 pass; 640 and 644 do not.
+		case "$MODE" in
+			*[1-7][0-7] | *[0-7][1-7])
+				red ".env.production is mode $MODE — readable beyond its owner"
+				detail "it holds the database password and the Django secret key"
+				detail "fix with:  chmod 600 .env.production"
+				;;
+			*)
+				green ".env.production is mode $MODE (owner only)"
+				;;
+		esac
+	fi
+fi
+
+# --- 4c. who can actually log in ----------------------------------------------
+# A deployment can pass every configuration check and still ship with accounts
+# nobody intended: load-test users from a demo database, a bootstrap account
+# whose file-read password was never changed, an unnoticed superuser. Our own
+# reference deployment accumulated 57 such accounts, and nothing could show
+# them because there was no way to list accounts at all.
+ACCOUNTS=$(be python manage.py list_users --concerns 2>&1)
+ACCOUNT_RC=$?
+if [ "$ACCOUNT_RC" -eq 0 ] && printf '%s' "$ACCOUNTS" | grep -q "nothing flagged"; then
+	green "$(printf '%s' "$ACCOUNTS" | head -1)"
+elif printf '%s' "$ACCOUNTS" | grep -q "warrant a look"; then
+	red "accounts on this server warrant an access review"
+	printf '%s
+' "$ACCOUNTS" | sed -n '3,$p' | while IFS= read -r line; do
+		[ -n "$line" ] && detail "$line"
+	done
+else
+	yellow "could not run the account review"
 fi
 
 # ---------------------------------------------------- 5. read-only role locked down
@@ -329,7 +380,7 @@ else
 fi
 
 # Container-level healthchecks, which is what restart:always acts on.
-for svc in postgres qdrant ollama backend caddy; do
+for svc in postgres redis qdrant ollama backend sync_worker caddy; do
 	CID=$($COMPOSE ps -q "$svc" 2>/dev/null | tr -d '\r')
 	if [ -z "$CID" ]; then
 		continue
@@ -359,6 +410,78 @@ if [ "$CODE" = "403" ] || [ "$CODE" = "401" ]; then
 else
 	red "unauthenticated /api/ask/ returned $CODE — expected 401/403"
 fi
+
+# ------------------------------------------------------- 8. the records are there
+section "8. Institutional records are loaded"
+
+# WHY THIS SECTION EXISTS
+# Until 25 Aug 2026 this script exited 0, every container reported healthy and
+# /api/health/ returned "ok" on a database containing nothing but the schema and
+# one admin account. SEED_DEMO_DATA is false in production, so that is the exact
+# state of a fresh install. Every question then answers "no matching records
+# were found" while the go-live gate says READY.
+#
+# A HALF-loaded import is the worse case: departments present, courses missing,
+# answers confident and silently incomplete. Counting per-table catches it;
+# a single SELECT 1 never could.
+
+ROWS="$(be python manage.py shell -c "
+from academics import models as m
+for n in ('Department','Program','Course','Faculty','FeeStructure','ClassSchedule'):
+    k = getattr(m, n, None)
+    print(n, k.objects.count() if k else 'MISSING')
+" 2>/dev/null | tr -d '\r')"
+
+if [ -z "$ROWS" ]; then
+	red "could not count institutional records"
+	detail "The backend did not answer. If the stack is still starting, re-run in a minute."
+else
+	EMPTY=0; TOTAL=0
+	while read -r NAME COUNT; do
+		[ -z "$NAME" ] && continue
+		case "$COUNT" in
+			''|*[!0-9]*) yellow "$NAME: $COUNT"; continue ;;
+		esac
+		TOTAL=$(( TOTAL + COUNT ))
+		if [ "$COUNT" -eq 0 ]; then
+			EMPTY=$(( EMPTY + 1 ))
+			yellow "$NAME is empty"
+		else
+			green "$NAME: $COUNT rows"
+		fi
+	done <<-ROWEOF
+	$ROWS
+	ROWEOF
+
+	if [ "$TOTAL" -eq 0 ]; then
+		red "the database holds NO institutional records"
+		detail "Every question will answer 'no matching records were found'. Import your data first — see DATA_IMPORT.md — then re-run this script."
+	elif [ "$EMPTY" -gt 0 ]; then
+		yellow "$EMPTY of the core tables are empty — a partial import looks likely"
+		detail "Answers drawn from a half-loaded database look authoritative and are silently incomplete. Confirm this is deliberate before opening to students."
+	fi
+fi
+
+# The search index has to be populated too, or descriptive questions fall back
+# to nothing while the vector store still reports itself reachable.
+QCOL="${QDRANT_COLLECTION:-college_docs}"
+PTS="$(be python -c "
+import os, json, urllib.request
+url = os.getenv('QDRANT_URL', 'http://qdrant:6333') + '/collections/' + '$QCOL'
+try:
+    with urllib.request.urlopen(url, timeout=5) as r:
+        print(json.load(r)['result']['points_count'])
+except Exception:
+    print('unreachable')
+" 2>/dev/null | tr -d '\r')"
+
+case "$PTS" in
+	unreachable|'') yellow "could not read the '$QCOL' search index" ;;
+	0)              red "the search index '$QCOL' is empty"
+	                detail "The sync worker turns records into searchable text. Check: $COMPOSE logs sync_worker" ;;
+	*[!0-9]*)       yellow "unexpected reply reading the search index: $PTS" ;;
+	*)              green "search index '$QCOL': $PTS entries" ;;
+esac
 
 # ------------------------------------------------------------------- summary
 printf '\n=============================================================\n'

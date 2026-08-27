@@ -599,3 +599,153 @@ class IdentityIsCachedAtLoginTests(TestCase):
         )
         self.assertEqual(response.json()["username"], "kira")
         self.assertTrue(response.json().get("degraded"))
+
+
+class ListUsersAnswersWhoHasAccessTests(TestCase):
+    """`manage.py list_users` — the read-only half of account management.
+
+    Every other account command changes something. Without a way to LOOK, the
+    first question of any access review had no answer an operator could
+    produce, and the reference deployment quietly accumulated 57 load-test
+    accounts that nobody could see.
+    """
+
+    def _run(self, *args):
+        """Run the command and return its output, recording the exit code.
+
+        --concerns exits 1 BY DESIGN when it finds something, so a helper that
+        let SystemExit propagate would make every flagging test an error.
+        The code is kept on self.exit_code for the tests that care about it.
+        """
+        out = StringIO()
+        self.exit_code = 0
+        try:
+            call_command("list_users", *args, stdout=out, stderr=out)
+        except SystemExit as exc:
+            self.exit_code = exc.code
+        return out.getvalue()
+
+    def test_it_lists_every_account(self):
+        _make_user("ana")
+        _make_user("ben")
+        output = self._run()
+        self.assertIn("ana", output)
+        self.assertIn("ben", output)
+
+    def test_staff_only_excludes_ordinary_users(self):
+        _make_user("ordinary")
+        boss = _make_user("boss")
+        boss.is_staff = True
+        boss.save(update_fields=["is_staff"])
+
+        output = self._run("--staff-only")
+        self.assertIn("boss", output)
+        self.assertNotIn("ordinary", output)
+
+    def test_a_superuser_is_flagged(self):
+        root = _make_user("root")
+        root.is_superuser = True
+        root.save(update_fields=["is_superuser"])
+
+        output = self._run("--concerns")
+        self.assertIn("root", output)
+        self.assertIn("SUPERUSER", output)
+
+    def test_an_account_with_no_profile_is_flagged(self):
+        """No profile means must_change_password cannot be enforced at all.
+
+        This is the one concern that is genuinely a defect rather than a
+        question, because the enforcement it disables is silent.
+        """
+        orphan = User.objects.create_user(username="orphan", password=PW)
+        UserProfile.objects.filter(user=orphan).delete()
+
+        output = self._run("--concerns")
+        self.assertIn("orphan", output)
+        self.assertIn("NO PROFILE", output)
+
+    def test_a_never_used_account_with_the_flag_cleared_is_flagged(self):
+        """The bootstrap password may still be live.
+
+        last_login is None means nobody has signed in; a clear
+        must_change_password means the flag was cleared by something other
+        than a user changing their password. Together they say the password
+        somebody read out of a file still works.
+        """
+        stale = _make_user("stale")
+        stale.last_login = None
+        stale.save(update_fields=["last_login"])
+        profile_for(stale).must_change_password = False
+        profile_for(stale).save(update_fields=["must_change_password"])
+
+        output = self._run("--concerns")
+        self.assertIn("stale", output)
+        self.assertIn("bootstrap password may still be live", output)
+
+    def test_untracked_provenance_is_flagged(self):
+        drifter = _make_user("drifter")
+        p = profile_for(drifter)
+        p.created_by = "legacy"
+        p.save(update_fields=["created_by"])
+
+        output = self._run("--concerns")
+        self.assertIn("drifter", output)
+        self.assertIn("legacy", output)
+
+    def test_a_properly_provisioned_account_is_not_flagged(self):
+        """The check has to be able to say nothing is wrong.
+
+        A reviewer that flags everything is the same as one that flags
+        nothing — neither directs attention anywhere.
+        """
+        from django.utils import timezone
+
+        clean = _make_user("clean")
+        clean.last_login = timezone.now()
+        clean.save(update_fields=["last_login"])
+        p = profile_for(clean)
+        p.created_by = "operator:admin"
+        p.must_change_password = False
+        p.save(update_fields=["created_by", "must_change_password"])
+
+        output = self._run("--concerns")
+        self.assertIn("nothing flagged", output)
+        self.assertNotIn("clean\n", output.replace("account(s).", ""))
+
+    def test_concerns_exits_non_zero_so_it_can_gate_a_release(self):
+        """The exit code is the feature.
+
+        A release gate or a cron job must be able to act on this without
+        anyone reading the text.
+        """
+        root = _make_user("root2")
+        root.is_superuser = True
+        root.save(update_fields=["is_superuser"])
+
+        self._run("--concerns")
+        self.assertEqual(self.exit_code, 1)
+
+    def test_a_clean_review_exits_zero(self):
+        from django.utils import timezone
+
+        clean = _make_user("clean2")
+        clean.last_login = timezone.now()
+        clean.save(update_fields=["last_login"])
+        p = profile_for(clean)
+        p.created_by = "operator:admin"
+        p.must_change_password = False
+        p.save(update_fields=["created_by", "must_change_password"])
+
+        self._run("--concerns")
+        self.assertEqual(self.exit_code, 0)
+
+    def test_no_password_or_hash_is_ever_printed(self):
+        """An access review is read over someone's shoulder and pasted into
+        tickets. It must be safe to share."""
+        user = _make_user("secretive")
+        output = self._run()
+
+        self.assertNotIn(PW, output)
+        self.assertNotIn(user.password, output)      # the hash itself
+        self.assertNotIn("pbkdf2", output)
+        self.assertNotIn("argon2", output)
