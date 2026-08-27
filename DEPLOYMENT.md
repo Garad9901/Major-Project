@@ -22,11 +22,22 @@ instead — that path is unchanged and deliberately kept separate.
 
 **Installed:** Docker Engine and the Compose plugin.
 
-**Hardware.** 16 GB RAM is the practical floor, and it is genuinely tight. Measured
-from the merged compose config: the container limits total **13.75 GB during first
-start** (12.75 GB once `ollama-pull` exits), plus ~2 GB for the host and Docker. On a
-16 GB machine that leaves roughly 250 MB of headroom on first boot, and nothing else
-may run on that box. **24–32 GB is what I would actually recommend.** Read
+**Hardware. 24 GB RAM is the practical floor; 32 GB is what to buy for
+institute-wide use.** Summed from the merged compose config with
+`docker compose config`, the container limits total **18.75 GB during first start**
+(17.75 GB once `ollama-pull` exits), plus ~2 GB for the host and Docker — about
+20.75 GB at first boot.
+
+> **This figure was wrong until 27 August 2026, and it was wrong in the
+> direction that costs money.** Every document repeated "16 GB minimum",
+> inherited from a comment block in `docker-compose.prod.yml` whose totals were
+> maintained by hand. The `ollama` limit had been raised from 8 GB to 12 GB —
+> so that all three models stay resident and no question pays a reload — and
+> neither the list nor the total was updated. `redis` and `backup` also had no
+> limit at all. **16 GB was never enough for the configuration as shipped.** If
+> you have already ordered on the old figure, say so before you deploy.
+
+Read
 [Known limits](#known-limits-read-this-before-promising-anything) before committing
 to institute-wide use; the throughput ceiling is low and it is the thing most likely
 to disappoint you.

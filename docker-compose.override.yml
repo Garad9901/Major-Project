@@ -41,7 +41,12 @@ services:
       context: ./frontend
     restart: always
     env_file:
-      - .env
+      # required:false so that a bare `docker compose ps|logs|exec` still parses
+      # in a production directory, which has .env.production and no .env. It
+      # used to be a hard requirement, so every such command failed with a
+      # file-not-found error — on exactly the day an operator needs them most.
+      - path: .env
+        required: false
     environment:
       VITE_API_PROXY_TARGET: http://backend:8000
     ports:

@@ -19,12 +19,12 @@ FROM node:20-alpine AS build
 
 WORKDIR /app
 
-# No package-lock.json exists in this repository, so `npm ci` is not usable.
-# NOTE: this means dependency versions are resolved at build time and are not
-# reproducible across builds. Committing a lockfile and switching to `npm ci` is
-# recommended before institute-wide rollout.
-COPY frontend/package.json ./
-RUN npm install
+# frontend/package-lock.json IS committed, so the build is reproducible.
+# It previously used `npm install` on the claim that no lockfile existed; the
+# lockfile was in the build context the whole time and simply never copied,
+# which meant two builds a week apart could ship different code to students.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
 
 COPY frontend/ ./
 

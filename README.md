@@ -20,8 +20,8 @@ and copy-paste a few lines into a terminal, you can run this.
 ## What you need first
 
 1. **A server or computer** running Windows, macOS, or Linux, with at least:
-   - **16 GB of RAM** (the AI model is large)
-   - **20 GB of free disk space**
+   - **24 GB of RAM** (the AI models are large and all stay loaded)
+   - **25 GB of free disk space**
 2. **Docker Desktop** — the one program that runs everything else.
    - Download it here: https://www.docker.com/products/docker-desktop/
    - Install it, then **start it** and wait until its whale icon says "Docker Desktop is running."

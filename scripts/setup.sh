@@ -94,14 +94,20 @@ fi
 docker info >/dev/null 2>&1 || die "the docker daemon is not running (or this user cannot reach it)."
 say "  docker daemon       OK"
 
-# RAM. The three models total ~7.7 GB resident and the stack needs headroom on
-# top. Below 16 GB this runs but swaps, and swapping during inference turns a
-# 30-second answer into a multi-minute one.
+# RAM. The container limits total 18.75 GB at first start (17.75 GB once
+# ollama-pull exits), plus ~2 GB for the host and Docker. Below that this runs
+# but swaps, and swapping during inference turns a 30-second answer into a
+# multi-minute one.
+#
+# This check said 16 GB until 27 August 2026, inherited from a hand-maintained
+# total in docker-compose.prod.yml that was never updated when the ollama limit
+# was raised from 8 GB to 12 GB. Re-derive with `docker compose config`, not
+# from memory.
 if [ -r /proc/meminfo ]; then
 	TOTAL_KB="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
 	TOTAL_GB="$((TOTAL_KB / 1024 / 1024))"
-	if [ "$TOTAL_GB" -lt 16 ]; then
-		warn "${TOTAL_GB} GB RAM detected. 16 GB is the practical minimum; the three models are ~7.7 GB resident. Expect swapping."
+	if [ "$TOTAL_GB" -lt 24 ]; then
+		warn "${TOTAL_GB} GB RAM detected. 24 GB is the practical minimum: container limits total 18.75 GB at first start, plus ~2 GB for the host. Expect swapping."
 	else
 		say "  RAM                 OK (${TOTAL_GB} GB)"
 	fi
@@ -152,7 +158,13 @@ ask() {
 	else
 		printf '%s: ' "$_prompt"
 	fi
-	read -r _answer || _answer=""
+	if ! read -r _answer; then
+		# EOF, not a blank line. Treating the two the same made this loop
+		# forever when stdin was a pipe, a provisioning tool, or
+		# `ssh host 'sh scripts/setup.sh'` — 762,000 lines in 8 seconds.
+		printf '\n'
+		die "no input available (stdin is not a terminal). Re-run with --non-interactive plus --name/--host/--email."
+	fi
 	[ -z "$_answer" ] && _answer="$_default"
 	eval "$_var=\$_answer"
 }
@@ -197,7 +209,7 @@ ask CONTACT_EMAIL "IT support email (optional, press enter to skip)" " "
 step "Generating secrets"
 
 if [ "$MODE" = "dev" ]; then
-	sh "$SCRIPT_DIR/generate_secrets.sh" "$ENV_FILE" >/dev/null
+	sh "$SCRIPT_DIR/generate_secrets.sh" "$ENV_FILE" | grep -E '^(WARNING|ERROR)' || true
 	# Development runs over plain HTTP on localhost, so the production-only
 	# hardening has to come back off or nothing is reachable.
 	TMP="$(mktemp)"
@@ -209,7 +221,10 @@ if [ "$MODE" = "dev" ]; then
 	rm -f "$TMP"
 	chmod 600 "$ENV_FILE"
 else
-	sh "$SCRIPT_DIR/generate_secrets.sh" "$ENV_FILE" >/dev/null
+	# Do NOT swallow this. generate_secrets.sh is the only thing that warns
+	# when the machine has fewer CPUs than inference is allocated, which is
+	# the difference between 20-second answers and universal timeouts.
+	sh "$SCRIPT_DIR/generate_secrets.sh" "$ENV_FILE" | grep -E '^(WARNING|ERROR)' || true
 fi
 say "  $ENV_FILE created (permissions 600). No secret has been printed."
 
@@ -261,14 +276,17 @@ else
 	# & and backslash are special in a sed REPLACEMENT (& means "the whole
 	# match"), so a college called "Mary's College & Institute" would silently
 	# corrupt the file. Escape them, and the delimiter, before substituting.
-	SAFE_NAME="$(printf '%s' "$INST_NAME" | sed -e 's/[\&|]/\&/g')"
-	SAFE_EMAIL="$(printf '%s' "$CONTACT_EMAIL" | sed -e 's/[\&|]/\&/g')"
+	SAFE_NAME="$(printf '%s' "$INST_NAME" | sed -e 's/[\\&|]/\\&/g')"
+	SAFE_EMAIL="$(printf '%s' "$CONTACT_EMAIL" | sed -e 's/[\\&|]/\\&/g')"
 	sed -e "s|\"name\": \"\"|\"name\": \"$SAFE_NAME\"|" \
 	    -e "s|\"contact_email\": \"\"|\"contact_email\": \"$SAFE_EMAIL\"|" \
 	    config/institution.example.json > "$INST_FILE"
 	# A mangled substitution yields invalid JSON, which the backend would fall
 	# back over at boot. Fail here instead, where the operator is watching.
-	grep -q "$INST_NAME" "$INST_FILE" || die "failed to write the institution name into $INST_FILE"
+	if ! grep -qF "$INST_NAME" "$INST_FILE"; then
+		rm -f "$INST_FILE"   # do not strand a corrupt file that blocks a re-run
+		die "failed to write the institution name into $INST_FILE"
+	fi
 fi
 say "  institution name set"
 
@@ -370,7 +388,13 @@ fi
 say ""
 say "  2. Read the bootstrap admin password out of $ENV_FILE (STAFF_PASSWORD),"
 say "     sign in, and CHANGE IT. Then create real per-person accounts:"
-say "         docker compose exec backend python manage.py create_user --help"
+if [ "$MODE" = "dev" ]; then
+	say "         docker compose exec backend python manage.py create_user --help"
+else
+	say "         docker compose --env-file .env.production \\"
+	say "             -f docker-compose.yml -f docker-compose.prod.yml \\"
+	say "             exec backend python manage.py create_user --help"
+fi
 say ""
 say "  3. Import your records. The system starts EMPTY on purpose:"
 say "         see DATA_IMPORT.md"

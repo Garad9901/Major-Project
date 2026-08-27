@@ -76,7 +76,14 @@
 		# removes the redirect from the equation: after one clean visit the
 		# browser refuses to speak HTTP to this host at all.
 		#
-		# max-age is one year, the usual value.
+		# max-age is NOT hardcoded here. It was, at one year, and that made the
+		# documented ramp in DEPLOYMENT.md and DJANGO_HSTS_SECONDS inert: the
+		# browser only ever saw this header, never Django's. Worse, under
+		# CADDY_TLS="tls internal" the first trusted visit pinned that browser
+		# to a non-bypassable certificate error for twelve months, with no
+		# server-side undo. The knob below defaults to 0 (no pinning) so the
+		# ramp is a deliberate act. Raise it once the certificate is known
+		# good: 3600, then 86400, then 31536000.
 		#
 		# NO includeSubDomains AND NO preload, deliberately. Both are effectively
 		# irreversible — preload requires a removal request and months of
@@ -84,7 +91,7 @@
 		# sibling hostname under the institute's domain, which this deployment
 		# does not control and could take offline. Add them only after the whole
 		# domain is known to be HTTPS-only.
-		Strict-Transport-Security "max-age=31536000"
+		Strict-Transport-Security "max-age={$CADDY_HSTS_MAX_AGE:0}"
 
 		# Belt and braces with frame-ancestors, for older browsers.
 		X-Frame-Options "DENY"

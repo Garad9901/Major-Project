@@ -46,45 +46,69 @@ x-logging: &default-logging
     max-file: "5"
 
 # ==============================================================================
-# RESOURCE LIMITS — sized against a 16 GB / 4-core baseline
+# RESOURCE LIMITS — 24 GB floor; CPU derived per machine
 # ==============================================================================
 # The target server was not decided when these were written, so every value is
 # an env var you can raise without editing this file. The MEMORY limits are the
 # ones that matter; the CPU limits mostly exist to stop a runaway small service
 # from starving Ollama.
 #
+# This heading said "16 GB / 4-core baseline". Both halves were wrong by the
+# time anyone read them: the memory total is 18.75 GB (see below), and the CPU
+# allocation is no longer a baseline at all — scripts/generate_secrets.sh
+# derives OLLAMA_CPU_LIMIT from the machine it runs on, because a literal that
+# suits one box collapses inference on another (measured 34x). See
+# docs/CAPACITY.md.
+#
 # A CPU limit HIGHER than the machine's core count is harmless (never reached),
 # so the defaults lean generous. A MEMORY limit that is too low is not harmless:
 # the kernel OOM-kills the container.
 #
-#   ollama       8 GB   qwen2.5:7b is ~4.7 GB resident plus ~275 MB for the
-#                       embedding model, plus per-request KV cache. THIS IS THE
-#                       CEILING THAT MATTERS. Below ~7 GB the model will not
-#                       load and every answer fails. With a smaller model
-#                       (qwen2.5:3b) this can drop to 4 GB.
+#   ollama      12 GB   qwen2.5:7b is ~4.7 GB resident, qwen2.5:3b ~2 GB and
+#                       the embedding model ~275 MB. THIS IS THE CEILING THAT
+#                       MATTERS. With OLLAMA_KEEP_ALIVE=-1 all three stay
+#                       resident (~7.7 GB) so that no question pays a reload,
+#                       plus per-request KV cache at num_ctx 8192. Below ~7 GB
+#                       the 7b model will not load and every answer fails.
 #   postgres     2 GB   shared_buffers plus connections; generous for this size
 #                       of dataset but cheap insurance during a restore.
 #   qdrant       1 GB   the vector index for institutional text is small.
 #   backend      1 GB   ONE gunicorn worker at ~250 MB plus headroom.
+#   redis      512 MB   the keyspace is capped at 256 MB by --maxmemory, but an
+#                       AOF rewrite forks and copy-on-write can transiently
+#                       approach double the resident set. 2x the cap.
+#   backup     512 MB   pg_dump and pg_restore --list both STREAM; they do not
+#                       buffer the database. This is headroom, not a working set.
 #   sync_worker  512 MB polls and embeds a few rows at a time.
 #   caddy        256 MB static files and TLS termination only.
 #   ollama-pull  1 GB   transient; only runs on first start.
 #
-# TOTALS (measured from the merged config, not estimated):
+# TOTALS (summed from the merged config with `docker compose config`):
 #
-#   all seven services      13.75 GB   <- worst case, during first start
-#   steady state            12.75 GB   <- ollama-pull has exited by then
+#   all nine services       18.75 GB   <- worst case, during first start
+#   steady state            17.75 GB   <- ollama-pull has exited by then
 #
-# Add ~2 GB for the host OS and Docker itself. So 16 GB is the practical FLOOR
-# and it is genuinely tight: at first start the ceiling is 13.75 + 2 = 15.75 GB
-# on a 16 GB machine, leaving ~250 MB of headroom. It works because ollama-pull
-# is only downloading, but nothing else may be running on that box.
+# Add ~2 GB for the host OS and Docker itself, so plan for ~20.75 GB at first
+# start. 24 GB IS THE PRACTICAL FLOOR and 32 GB is what to buy for
+# institute-wide use.
 #
-# 24-32 GB is what I would actually recommend for institute-wide use.
+# TWO CORRECTIONS, BOTH LEFT VISIBLE BECAUSE THEY CHANGE A HARDWARE ORDER:
 #
-# (An earlier version of this note said 12.75 GB was the total of the list
-# above. That was the steady-state figure with ollama-pull omitted, which
-# understated the first-start requirement by exactly its 1 GB limit.)
+#   1. An earlier version of this note said 12.75 GB was the total of the list
+#      above. That was the steady-state figure with ollama-pull omitted, which
+#      understated the first-start requirement by exactly its 1 GB limit.
+#
+#   2. The list above then said ollama was 8 GB and the totals said 13.75 GB,
+#      while the actual limit had been RAISED TO 12 GB to keep all three models
+#      resident — and neither the list nor the total was updated. Every
+#      document that repeated "16 GB minimum" inherited that error from here.
+#      The real figure is 18.75 GB, and 16 GB was never enough for the
+#      configuration as shipped. redis and backup also had NO limit at all;
+#      they now have one, which is what takes 17.75 GB to 18.75 GB.
+#
+# The lesson, since it has now happened twice in this same block: a total
+# written by hand next to values that change is a total that will be wrong.
+# Re-derive it with `docker compose config` rather than trusting this comment.
 # ==============================================================================
 
 services:
@@ -162,6 +186,10 @@ services:
       # renewed automatically. Set to "tls internal" for a LAN-only deployment
       # with a self-signed certificate. See the header of Caddyfile.prod.
       CADDY_TLS: ${CADDY_TLS-}
+      # HSTS ramp. 0 = no pinning (the safe default). Raise deliberately once
+      # the certificate is known good: 3600 -> 86400 -> 31536000. This is the
+      # only knob; Caddyfile.prod no longer hardcodes a one-year max-age.
+      CADDY_HSTS_MAX_AGE: ${CADDY_HSTS_MAX_AGE:-0}
     depends_on:
       backend:
         condition: service_healthy
@@ -219,6 +247,43 @@ services:
           cpus: "${CADDY_CPU_LIMIT:-0.5}"
 
   # --- infrastructure limits (production only; dev stays unconstrained) -------
+
+  # redis and backup had NO memory limit until now, so they were the only two
+  # services that could grow into the host's memory rather than being OOM-killed
+  # in isolation. Neither is a realistic runaway, which is why it went unnoticed
+  # — but "unbounded" and "small in practice" are different guarantees, and only
+  # one of them survives a bad day.
+  redis:
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          # 2x the 256 MB --maxmemory cap in docker-compose.yml. The KEYSPACE is
+          # already bounded; what is not is the process around it. An AOF
+          # rewrite forks, and copy-on-write can push the resident set towards
+          # double the dataset before the child exits.
+          #
+          # noeviction means a genuinely full keyspace fails WRITES loudly
+          # rather than silently dropping sessions, so the failure this limit
+          # guards against is the fork, not the data.
+          memory: ${REDIS_MEMORY_LIMIT:-512m}
+          cpus: "${REDIS_CPU_LIMIT:-0.5}"
+
+  backup:
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          # pg_dump --format=custom and pg_restore --list both STREAM. Neither
+          # holds the database in memory, so this is headroom for compression
+          # buffers rather than a working set that scales with the data.
+          memory: ${BACKUP_MEMORY_LIMIT:-512m}
+          # Deliberately low. A backup that runs slightly slower is fine; a
+          # backup that competes with inference for CPU is not, because
+          # OLLAMA_NUM_THREAD is sized on the assumption that nothing else is
+          # contending for those cores.
+          cpus: "${BACKUP_CPU_LIMIT:-1.0}"
+
   postgres:
     logging: *default-logging
     deploy:
