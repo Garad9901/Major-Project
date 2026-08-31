@@ -275,9 +275,29 @@ RESOLVE_NUM_PREDICT = int(os.getenv("RESOLVE_NUM_PREDICT", "80"))
 def _resolve_model():
     # The rewrite is a small, mechanical substitution — the 3B model handles it
     # and is roughly 2.5x faster than the 7B. Same model the router falls back
-    # to, so it is already resident.
-    return os.getenv(
-        "RESOLVE_MODEL", os.getenv("ROUTER_MODEL", os.getenv("LLM_MODEL", "qwen2.5:3b"))
+    # to, so on a default deployment it is already resident.
+    #
+    # MUST MATCH common.ollama._configured_models(), which is what the readiness
+    # check and backend/scripts/required_models.sh both derive from. This was
+    # the last model variable outside that set, and being outside it was worse
+    # than the ROUTER_MODEL bug rather than a repeat of it: because is_ready()
+    # never listed RESOLVE_MODEL, health stayed GREEN and a deployment that set
+    # it explicitly would fail as a 404 from Ollama on the first follow-up
+    # question. common/test_model_config.py now fails if a model variable is
+    # missing from either side rather than only when the values disagree.
+    #
+    # Imported HERE, not at module level, matching resolve() below — and this
+    # import is load-bearing rather than stylistic. Without it this function
+    # raised NameError: resolve() imports `ollama` into ITS OWN local scope,
+    # which a separate function cannot see. The try/except in resolve() catches
+    # only LLMUnavailable, so the NameError escaped it and resolve() raised —
+    # breaking its documented "NEVER RAISES" contract on the FIRST follow-up
+    # question, where the whole point is to degrade to the unresolved question
+    # rather than fail.
+    from common import ollama
+
+    return ollama.model_from_env(
+        "RESOLVE_MODEL", ollama.model_from_env("ROUTER_MODEL", "qwen2.5:3b")
     )
 
 
