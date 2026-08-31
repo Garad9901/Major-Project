@@ -103,7 +103,9 @@ class GenerationTokenClearsOtherProcessesTests(TestCase):
         shared_cache.set(cache._GENERATION_KEY, "token-one", timeout=None)
         cache.lookup(q, lambda x: _vector(1))          # clears, syncs to token-one
 
-        again = self._store(q)
+        # The call re-stores; its return value is not needed here (the
+        # question `q` is already held above).
+        self._store(q)
         hit = cache.lookup(q, lambda x: _vector(1))
         self.assertIsNotNone(hit, "the cache cleared itself on an unchanged token")
 
