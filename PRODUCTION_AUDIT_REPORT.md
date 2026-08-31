@@ -15,6 +15,10 @@ inferred from reading code alone unless it says so.
 **Fourteen real defects were found and twelve were fixed.** Two are documented
 below as *not fixed*, with reasons.
 
+> **Read the [Addendum](#addendum--31-august-2026) too.** A re-verification on
+> 31 August found three more defects, including one that crashed every follow-up
+> question and one where finding 11 was closed while the defect survived.
+
 Three of them would have caused visible harm on day one:
 
 | | What would have happened |
@@ -278,7 +282,7 @@ updated. Scanning one image of a multi-image stack is how that survives.
 
 ---
 
-### 11. Stale comment argued against ever enabling HSTS — FIXED
+### 11. Stale comment argued against ever enabling HSTS — FIXED, then REOPENED (see addendum finding 16)
 
 `config/settings/production.py` stated as fact that "this server uses a
 self-signed certificate from Caddy's internal CA". That stopped being true when
@@ -289,6 +293,12 @@ operator HSTS was off for a reason that no longer applied.
 **Fix:** rewritten with the correct trigger (confirm the certificate, then ramp
 3600 → 86400 → 31536000), plus a scope note that Django emits HSTS on `/api/`
 and `/static/` but not on `index.html`, which Caddy serves directly.
+
+> **That scope note was itself false, and the ramp it documented had no effect.**
+> Caddy sets `Strict-Transport-Security` on *every* response and its header
+> directive replaces rather than appends, so Django's value never reaches a
+> browser. Closing this finding on a corrected comment left the actual defect
+> in place for three weeks. See addendum finding 16.
 
 ---
 
@@ -351,7 +361,7 @@ starves everyone else under `LLM_MAX_CONCURRENCY=1`.
 
 ---
 
-### 14. `.env.example` is not committed — **FOUND, NOT FIXED**
+### 14. `.env.example` is not committed — **FIXED** (confirmed tracked)
 
 `.gitignore` has the correct `!.env.example` negation, so it *can* be added — it
 simply never was. README lines 49 and 53 both tell a new operator to
@@ -360,6 +370,112 @@ simply never was. README lines 49 and 53 both tell a new operator to
 It **is** now in the initial commit I made (it was in the working tree), so this
 is resolved in practice. Flagged so you know it was never versioned before, and
 that README depends on it.
+
+---
+
+## Addendum — 31 August 2026
+
+**Method.** The original audit could not run every suite against a database, so
+the DB-backed suites were never executed. This pass stood up a live Postgres and
+Redis and ran the **whole** backend suite, plus Django's deploy check under
+production settings, migrations onto an empty database, pyflakes-level static
+analysis, `shellcheck` over the deployment scripts, and a
+documentation-versus-code consistency pass.
+
+**Three further defects were found. All three are fixed.** Test count: **323 to
+327** (the four new ones pin finding 16), all passing.
+
+The same limitation as the original audit still applies, and is now the only one
+left: nothing here was executed against the real Docker stack. Every test mocks
+the language model, so Ollama, Qdrant, sync_worker and Caddy TLS remain
+unexercised together. Go-live item 1 is still the largest open gap.
+
+---
+
+### 15. Every follow-up question raised NameError — FIXED
+
+`orchestrator/conversation.py::_resolve_model()` called `ollama.model_from_env()`,
+but `ollama` was imported inside `resolve()` — a *different function's* local
+scope, which `_resolve_model()` cannot see. It therefore raised `NameError`, and
+`resolve()` catches only `LLMUnavailable`, so the error escaped and broke that
+function's documented "NEVER RAISES" contract.
+
+This fired on the **first follow-up question of any conversation** — "how many
+departments are there?" then "name them" — which is the entire mechanism the
+module exists to provide. It was invisible until now because the orchestrator
+suite needs a database; once it could run, **11 tests errored on it**.
+
+It entered with the fix for the RESOLVE_MODEL readiness gap, which converted the
+call to `ollama.model_from_env()` without adding the import.
+
+**Fix:** import inside `_resolve_model()`, where it is used, with a note saying
+why the placement is load-bearing rather than stylistic. Covered by the 82
+orchestrator tests.
+
+---
+
+### 16. Enabling HSTS by the documented procedure did nothing — FIXED
+
+Supersedes finding 11, which was closed on a comment correction while the defect
+survived.
+
+HSTS is set in two places and only one reaches a browser:
+
+| Where | Value |
+|---|---|
+| `Caddyfile.prod` | `Strict-Transport-Security "max-age={$CADDY_HSTS_MAX_AGE:0}"` |
+| `production.py` | `SECURE_HSTS_SECONDS` from `DJANGO_HSTS_SECONDS` |
+
+Caddy terminates TLS in front of Django, and a Caddy `header` directive
+**replaces** rather than appends — so a browser only ever receives
+`CADDY_HSTS_MAX_AGE`. `Caddyfile.prod`'s own comment already said as much: *"the
+browser only ever saw this header, never Django's."*
+
+Every operator document named the wrong knob. DEPLOYMENT.md Step 8, OPERATIONS.md
+section 1 and SECURITY.md all instructed the operator to ramp
+`DJANGO_HSTS_SECONDS`. `CADDY_HSTS_MAX_AGE` appeared in exactly one place in the
+whole repository — a compose default of `0` — and in no document and no env file.
+
+So the documented procedure produced this: the operator distributes the CA, sets
+`DJANGO_HSTS_SECONDS=31536000`, restarts, and believes the site is pinned. Caddy
+goes on stamping `max-age=0`, which does not merely leave HSTS off — it instructs
+browsers to **discard a pin they already hold**. Documented as protected, in fact
+unprotected, which this project treats as the worst of the three states.
+
+**Fix:** `CADDY_HSTS_MAX_AGE` added to `.env.production` beside the Django knob;
+the false scope note in `production.py` replaced with what actually ships; the
+ramp instructions in DEPLOYMENT.md, OPERATIONS.md and SECURITY.md now name the
+knob that reaches the browser and keep both in step. Default is unchanged and
+still `0` — off remains correct until the certificate is confirmed.
+
+**Regression test:** `backend/health/test_hsts_config.py` fails if the two knobs
+drift. Verified to fail on the exact operator mistake: *"HSTS knobs disagree:
+CADDY_HSTS_MAX_AGE='0' but DJANGO_HSTS_SECONDS='31536000'."*
+
+---
+
+### 17. capacity_test.sh measured a department that does not exist — FIXED
+
+Three line continuations in `scripts/capacity_test.sh` were written as a literal
+two-character `\n` instead of a backslash and a newline. Unquoted, the shell
+strips the backslash and leaves the bare word `n`.
+
+* **Question pool** (two occurrences). The department list expanded to
+  `Engineering, Computer Science, Science, Management, Education, `**`n`**`, Arts
+  and Humanities, Social Science, Medicine` — so one question in nine asked *"How
+  many faculty are in the n department?"*, roughly 11% of the distinct-question
+  load spent on a department that does not exist.
+* **The `curl` in `ask()`** (one occurrence). `n` became an extra operand, which
+  curl reads as a second URL, corrupting the recorded HTTP status — the same
+  shape as the earlier fix "capacity_test.sh reported every successful answer as
+  a failure".
+
+This is the script that produced the capacity figures quoted in this report and
+in DEPLOYMENT.md. **Those numbers were measured with the faulty pool and should
+be re-taken** when go-live item 3 is done.
+
+**Fix:** all three restored to real line continuations; verified by expanding the
+list before and after.
 
 ---
 
@@ -669,7 +785,8 @@ assertions)
 
 1. **Deploy to the real server and run `scripts/verify_deployment.sh`** — closes
    the largest gap in this audit.
-2. **Fix finding 13** (per-request nonce for fence markers) if internet-facing.
+2. ~~**Fix finding 13** (per-request nonce for fence markers) if internet-facing.~~
+   **Done** — finding 13 is fixed in commit `88e7e6a`.
 3. **Re-run the 50-user load test on the real hardware.** At 3.3 answers/min,
    29 of 50 concurrent users are turned away. If that is not acceptable, the
    hardware discussion from the previous session applies — this is a GPU
@@ -679,4 +796,5 @@ assertions)
 5. **Confirm the audit-log purge is actually scheduled** — `crontab -l | grep
    purge_audit_log`. Retention only exists if it runs.
 6. **Copy backups off the machine.** `backup.sh` warns about this itself.
-7. **Consider a git remote.** The project now has history; it has nowhere to go.
+7. ~~**Consider a git remote.** The project now has history; it has nowhere to go.~~
+   **Done** — `origin` is configured. Keep it pushed; work has sat unpushed since.
