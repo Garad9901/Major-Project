@@ -214,7 +214,10 @@ correctly; `NUM_PROXIES=1` so per-IP limits key on the real client — and a
 client **cannot** spoof `X-Forwarded-For` to escape a rate-limit bucket
 (verified: a second forged IP was still throttled).
 
-**HSTS is deliberately off by default** (`DJANGO_HSTS_SECONDS=0`). With a
+**HSTS is deliberately off by default** (`CADDY_HSTS_MAX_AGE=0`, with
+`DJANGO_HSTS_SECONDS=0` kept in step). Caddy sets this header on every response
+and its header directive replaces Django's, so `CADDY_HSTS_MAX_AGE` is the value
+a browser receives; raising the Django one alone has no effect. With a
 self-signed certificate HSTS removes the user's ability to click through the
 warning and locks everyone out for the full max-age. Enable it only after the
 CA is distributed, ramping 3600 → a day → a year.

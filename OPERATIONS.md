@@ -92,7 +92,11 @@ before. HSTS makes certificate warnings non-bypassable, which is what you want
 with a real certificate and a lockout with a self-signed one. Ramp it:
 
 ```
-DJANGO_HSTS_SECONDS=3600        # then 86400, then 31536000
+# Caddy's value is the one the browser actually sees: it sets this header on
+# every response and REPLACES Django's. Setting only DJANGO_HSTS_SECONDS leaves
+# max-age=0 on the wire, which tells browsers to forget any pin they hold.
+CADDY_HSTS_MAX_AGE=3600      # then 86400, then 31536000
+DJANGO_HSTS_SECONDS=3600     # keep in step with the line above
 ```
 
 ### LAN-only alternative
@@ -107,7 +111,9 @@ dcp cp caddy:/data/caddy/pki/authorities/local/root.crt ./college-assistant-ca.c
 ```
 
 Distribute that file and install it as a trusted root on each machine. Leave
-`DJANGO_HSTS_SECONDS=0` until that is done everywhere.
+**both** `CADDY_HSTS_MAX_AGE=0` and `DJANGO_HSTS_SECONDS=0` until that is done
+everywhere — Caddy's is the value browsers act on, so leaving it at 0 is what
+actually keeps the lockout risk away.
 
 > Self-signed certificates on an internet-facing service are **not**
 > appropriate: they train users to click through security warnings, which is the

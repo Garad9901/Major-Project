@@ -346,7 +346,11 @@ Install it as a trusted root CA on client machines (via group policy or your SOE
 image). Only **after** every machine trusts it, consider enabling HSTS:
 
 ```
-DJANGO_HSTS_SECONDS=3600     # then 86400, then 31536000
+# Caddy's value is the one the browser actually sees: it sets this header on
+# every response and REPLACES Django's. Setting only DJANGO_HSTS_SECONDS leaves
+# max-age=0 on the wire, which tells browsers to forget any pin they hold.
+CADDY_HSTS_MAX_AGE=3600      # then 86400, then 31536000
+DJANGO_HSTS_SECONDS=3600     # keep in step with the line above
 ```
 
 > **Do not enable HSTS before the CA is distributed.** HSTS makes the certificate

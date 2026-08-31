@@ -132,16 +132,40 @@ SECURE_SSL_REDIRECT = True
 # So: confirm the certificate first, then ramp 3600 -> 86400 -> 31536000.
 # OPERATIONS.md section 1 has the confirmation command and the same ramp.
 #
-# SCOPE NOTE: this header is emitted by Django, so it rides on /api/ and
-# /static/ responses but not on index.html, which Caddy serves directly. HSTS is
-# origin-scoped, so the policy still covers the whole site as soon as the SPA
-# makes its first API call — but that leaves the very first page load of a brand
-# new browser profile unprotected. Closing that gap means adding the header in
-# Caddyfile.prod as well, which is deliberately NOT done here: it would put the
-# lockout risk outside the env var that gates the ramp above.
+# SCOPE NOTE — AND THIS SETTING IS INERT IN THE DOCKER DEPLOYMENT.
+# An earlier version of this note said the header is emitted by Django, rides on
+# /api/ and /static/, and that adding it to Caddyfile.prod was "deliberately NOT
+# done". Both halves are false as the stack actually ships. Caddyfile.prod sets
+#
+#     Strict-Transport-Security "max-age={$CADDY_HSTS_MAX_AGE:0}"
+#
+# on EVERY response, and a Caddy header directive REPLACES rather than appends,
+# so Django's value never reaches a browser — Caddyfile.prod's own comment says
+# as much. Left uncorrected, this note sent an operator to the wrong knob: they
+# would set DJANGO_HSTS_SECONDS, believe the site was pinned, and in fact still
+# be serving max-age=0, which instructs a browser to DISCARD any pin it holds.
+# Documented-as-protected while actually unprotected is the worst of the three
+# possible states, which is why this is spelled out rather than trimmed.
+#
+# CADDY_HSTS_MAX_AGE is the knob that reaches the browser; .env.production
+# carries both. This setting is kept, and kept in step, so that a deployment
+# which ever terminates TLS somewhere other than this Caddyfile is not silently
+# left with no HSTS at all.
 SECURE_HSTS_SECONDS = int(os.getenv("DJANGO_HSTS_SECONDS", "0"))
 SECURE_HSTS_INCLUDE_SUBDOMAINS = SECURE_HSTS_SECONDS > 0
 SECURE_HSTS_PRELOAD = False  # never preload a private/internal hostname
+
+# W021 asks why SECURE_HSTS_PRELOAD is not True. It is False on purpose, one
+# line above, and always will be: preload submission is effectively irreversible
+# and must never be applied to an institutional hostname. Silenced so that
+# `manage.py check --deploy` returns CLEAN once the HSTS ramp above is complete
+# - an audit gate that always emits one known warning trains the reader to
+# ignore the output, and the next warning to appear would be a real one.
+#
+# W004 (HSTS not set) is deliberately NOT silenced: while DJANGO_HSTS_SECONDS is
+# still 0 that warning is the operator's outstanding to-do, and it disappears by
+# itself the moment the ramp is done.
+SILENCED_SYSTEM_CHECKS = ["security.W021"]
 
 # --- response headers -----------------------------------------------------------
 X_FRAME_OPTIONS = "DENY"           # no framing at all; the SPA never frames itself
