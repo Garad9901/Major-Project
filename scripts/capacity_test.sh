@@ -155,7 +155,8 @@ ask_one() {
 	CODE=$(curl -sk -o "$2.body" -w '%{http_code}' --max-time 600 \
 		-b "$JAR" -X POST "$SERVER_URL/api/ask/" \
 		-H "Content-Type: application/json" -H "X-CSRFToken: $CSRF" \
-		-H "Referer: $SERVER_URL/" \n		-d "{\"question\":$1,\"regenerate\":$3}" 2>/dev/null || echo 000)
+		-H "Referer: $SERVER_URL/" \
+		-d "{\"question\":$1,\"regenerate\":$3}" 2>/dev/null || echo 000)
 	E=$(date +%s)
 	# CLASSIFY ON THE `done` EVENT, NOT ON THE STRING "error".
 	#
@@ -201,7 +202,8 @@ ask_one() {
 # ------------------------------------------------------------------------------
 build_question_pool() {
 	POOL=""
-	for D in Engineering "Computer Science" Science Management Education \n	         "Arts and Humanities" "Social Science" Medicine; do
+	for D in Engineering "Computer Science" Science Management Education \
+	         "Arts and Humanities" "Social Science" Medicine; do
 		POOL="$POOL|How many faculty are in the $D department?"
 	done
 	for R in Professor "Associate Professor" "Assistant Professor" Lecturer; do
@@ -215,7 +217,8 @@ build_question_pool() {
 	done
 	# Cross department x rank, so a USERS=50 run still gets 50 genuinely
 	# distinct questions rather than wrapping around a short pool.
-	for D in Engineering "Computer Science" Science Management Education \n	         "Arts and Humanities" "Social Science" Medicine; do
+	for D in Engineering "Computer Science" Science Management Education \
+	         "Arts and Humanities" "Social Science" Medicine; do
 		for R in Professor "Associate Professor" "Assistant Professor" Lecturer; do
 			POOL="$POOL|How many $R faculty are in the $D department?"
 		done
@@ -271,6 +274,7 @@ run_wave() {
 	OK=0; BUSY=0; ERR=0; TOTAL_T=0
 	for F in "$WORK"/*; do
 		case "$F" in *.body) continue ;; esac
+		# shellcheck disable=SC2046  # word splitting is the point: fields -> $1..$4
 		set -- $(cat "$F")
 		case "$1" in
 			ok)   OK=$((OK + 1));   TOTAL_T=$((TOTAL_T + $2)) ;;
@@ -292,6 +296,7 @@ run_wave() {
 	FASTEST=0; SLOWEST=0
 	for F in "$WORK"/*; do
 		case "$F" in *.body) continue ;; esac
+		# shellcheck disable=SC2046  # word splitting is the point: fields -> $1..$4
 		set -- $(cat "$F")
 		[ "$1" = "ok" ] || continue
 		[ "$FASTEST" -eq 0 ] || [ "$2" -lt "$FASTEST" ] && FASTEST=$2
@@ -366,7 +371,9 @@ run_wave "${REPETITION}% repeated questions" repeating
 
 rm -f "$JAR"
 
+# shellcheck disable=SC2046  # word splitting is the point: fields -> $1..$4
 set -- $(cat /tmp/capacity_distinct); D_OK=$1; D_MEAN=$4
+# shellcheck disable=SC2046  # word splitting is the point: fields -> $1..$4
 set -- $(cat /tmp/capacity_repeating); R_OK=$1; R_MEAN=$4
 rm -f /tmp/capacity_distinct /tmp/capacity_repeating
 
