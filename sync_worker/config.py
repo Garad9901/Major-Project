@@ -9,14 +9,29 @@ load_dotenv()
 
 logger = logging.getLogger("sync_worker")
 
+# COPY of backend/common/env.py's env_chain(), four lines, kept in sync by hand.
+# This service has its own Docker build context (./sync_worker) and cannot
+# import backend code — see the module-level note in common/env.py. Without
+# this, a RAG_AGENT_RO_* value that is set but BLANK (Docker Compose's
+# `${RAG_AGENT_RO_HOST:-}` shape) resolves to "" instead of falling through to
+# POSTGRES_HOST/PORT/DB, because plain os.getenv(name, default) only applies
+# `default` when `name` is absent, not when it is present-but-empty.
+def _env_chain(*names, default=None):
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return default
+
+
 DB_CONFIG = {
-    "host": os.getenv("RAG_AGENT_RO_HOST", os.getenv("POSTGRES_HOST", "postgres")),
-    "port": os.getenv("RAG_AGENT_RO_PORT", os.getenv("POSTGRES_PORT", "5432")),
-    "dbname": os.getenv("RAG_AGENT_RO_DB", os.getenv("POSTGRES_DB", "college_rag")),
-    "user": os.getenv("RAG_AGENT_RO_USER", "rag_agent_ro"),
+    "host": _env_chain("RAG_AGENT_RO_HOST", "POSTGRES_HOST", default="postgres"),
+    "port": _env_chain("RAG_AGENT_RO_PORT", "POSTGRES_PORT", default="5432"),
+    "dbname": _env_chain("RAG_AGENT_RO_DB", "POSTGRES_DB", default="college_rag"),
+    "user": _env_chain("RAG_AGENT_RO_USER", default="rag_agent_ro"),
     "password": os.getenv("RAG_AGENT_RO_PASSWORD"),
     # Encrypted even on the internal network — see docker/Dockerfile.postgres.
-    "sslmode": os.getenv("POSTGRES_SSLMODE", "require"),
+    "sslmode": _env_chain("POSTGRES_SSLMODE", default="require"),
 }
 
 POLL_INTERVAL_SECONDS = int(os.getenv("SYNC_WORKER_POLL_INTERVAL_SECONDS", "30"))

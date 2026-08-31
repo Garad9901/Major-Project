@@ -29,6 +29,8 @@ import re
 import threading
 from urllib.parse import urlparse
 
+from common import env
+
 logger = logging.getLogger("web_agent")
 
 # WHERE THE LIST LIVES, AND WHY IT MOVED.
@@ -50,7 +52,11 @@ _CONFIG_PATH = os.path.abspath(
 )
 _LEGACY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "urls_allowlist.json")
 
-ALLOWLIST_PATH = os.getenv("WEB_AGENT_ALLOWLIST", os.getenv("INSTITUTION_CONFIG", _CONFIG_PATH))
+# env_chain (common/env.py): a WEB_AGENT_ALLOWLIST or INSTITUTION_CONFIG value
+# that is set but BLANK now falls through the chain to _CONFIG_PATH, same as
+# an unset one — the nested os.getenv() this replaced returned "" instead, the
+# same blank-vs-unset defect env.py exists to remove (see its docstring).
+ALLOWLIST_PATH = env.env_chain("WEB_AGENT_ALLOWLIST", "INSTITUTION_CONFIG", default=_CONFIG_PATH)
 
 # Only these schemes are ever fetched. file:, ftp:, gopher: and data: are all
 # ways to turn a fetcher into something else entirely.

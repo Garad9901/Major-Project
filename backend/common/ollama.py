@@ -5,7 +5,7 @@ import os
 
 import requests
 
-from common import llm_metrics
+from common import env, llm_metrics
 from common.exceptions import LLMUnavailable
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
@@ -263,9 +263,13 @@ def model_from_env(name, fallback):
     LLM_MODEL. Verified: VERIFICATION_MODEL= resolves to '' under the old
     pattern. So blank means "use the fallback", here and in scripts/
     required_models.sh, which must agree with this function.
+
+    ONE IMPLEMENTATION, in common/env.py — the same defect appeared in nine
+    database settings and an allowlist path, so it is not a model-specific
+    concern. This name stays because "which model" reads better than "which
+    environment variable" at the agent call sites.
     """
-    value = os.getenv(name, "")
-    return value.strip() or fallback
+    return env.env_or(name, fallback)
 
 
 def _configured_models():
@@ -303,6 +307,16 @@ def _configured_models():
         # would have been the mirror of the router bug: readiness reporting
         # ready while the SQL agent's model was not resident.
         model_from_env("SQL_AGENT_MODEL", llm),
+        # RESOLVE_MODEL rewrites a follow-up question against the conversation
+        # so far (orchestrator/conversation.py). It was missing from BOTH this
+        # function and the puller, which is worse than the ROUTER_MODEL bug
+        # rather than a repeat of it: absent from here, is_ready() never names
+        # it, so health stays GREEN and the failure appears as a 404 from
+        # Ollama the first time a user asks a follow-up.
+        #
+        # It falls back through ROUTER_MODEL, which is why a default deployment
+        # never noticed.
+        model_from_env("RESOLVE_MODEL", model_from_env("ROUTER_MODEL", "qwen2.5:3b")),
     ]
 
     # Deduplicate, preserving order. Several of these resolving to LLM_MODEL is

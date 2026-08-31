@@ -5,6 +5,8 @@ import os
 import psycopg2
 from django.core.management.base import BaseCommand, CommandError
 
+from common import env
+
 WRITE_PRIVILEGES = ["INSERT", "UPDATE", "DELETE", "TRUNCATE"]
 
 
@@ -39,10 +41,15 @@ class Command(BaseCommand):
             )
 
         conn = psycopg2.connect(
-            host=os.getenv("RAG_AGENT_RO_HOST", os.getenv("POSTGRES_HOST", "postgres")),
-            port=os.getenv("RAG_AGENT_RO_PORT", os.getenv("POSTGRES_PORT", "5432")),
-            dbname=os.getenv("RAG_AGENT_RO_DB", os.getenv("POSTGRES_DB", "college_rag")),
-            user=os.getenv("RAG_AGENT_RO_USER", "rag_agent_ro"),
+            # env_chain (backend/common/env.py): a *blank* RAG_AGENT_RO_* value
+            # (e.g. Docker Compose's `${RAG_AGENT_RO_HOST:-}`) falls through to
+            # POSTGRES_HOST/PORT/DB, same as an unset one. The nested os.getenv()
+            # this replaced did not: a blank override silently resolved to "",
+            # producing a DNS-lookup failure instead of the intended fallback.
+            host=env.env_chain("RAG_AGENT_RO_HOST", "POSTGRES_HOST", default="postgres"),
+            port=env.env_chain("RAG_AGENT_RO_PORT", "POSTGRES_PORT", default="5432"),
+            dbname=env.env_chain("RAG_AGENT_RO_DB", "POSTGRES_DB", default="college_rag"),
+            user=env.env_or("RAG_AGENT_RO_USER", "rag_agent_ro"),
             password=password,
         )
         conn.autocommit = True

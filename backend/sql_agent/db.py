@@ -8,6 +8,7 @@ import threading
 import psycopg2
 import psycopg2.pool
 
+from common import env
 from common.exceptions import DatabaseUnavailable
 
 logger = logging.getLogger("sql_agent")
@@ -17,14 +18,20 @@ logger = logging.getLogger("sql_agent")
 # LLM-generated queries — only ever connects as rag_agent_ro, so a bug here
 # can't do more than that role's grants allow (see db/sql/create_rag_agent_ro.sql).
 RAG_AGENT_RO_CONFIG = {
-    "host": os.getenv("RAG_AGENT_RO_HOST", os.getenv("POSTGRES_HOST", "postgres")),
-    "port": os.getenv("RAG_AGENT_RO_PORT", os.getenv("POSTGRES_PORT", "5432")),
-    "dbname": os.getenv("RAG_AGENT_RO_DB", os.getenv("POSTGRES_DB", "college_rag")),
-    "user": os.getenv("RAG_AGENT_RO_USER", "rag_agent_ro"),
+    # env_chain (common/env.py): a RAG_AGENT_RO_* value that is set but BLANK
+    # (Docker Compose's `${RAG_AGENT_RO_HOST:-}` shape) now falls through to
+    # POSTGRES_HOST/PORT/DB, same as an unset one. The nested os.getenv() this
+    # replaced did not — a blanked-out override resolved to "" and the inner
+    # fallback was never consulted, turning "I don't need a separate one" into
+    # a DNS-lookup failure against an empty hostname.
+    "host": env.env_chain("RAG_AGENT_RO_HOST", "POSTGRES_HOST", default="postgres"),
+    "port": env.env_chain("RAG_AGENT_RO_PORT", "POSTGRES_PORT", default="5432"),
+    "dbname": env.env_chain("RAG_AGENT_RO_DB", "POSTGRES_DB", default="college_rag"),
+    "user": env.env_or("RAG_AGENT_RO_USER", "rag_agent_ro"),
     "password": os.getenv("RAG_AGENT_RO_PASSWORD"),
     # Encrypted even though this is an internal bridge: every row this
     # connection returns is institutional data. See docker/Dockerfile.postgres.
-    "sslmode": os.getenv("POSTGRES_SSLMODE", "require"),
+    "sslmode": env.env_or("POSTGRES_SSLMODE", "require"),
 }
 
 CONNECT_TIMEOUT_S = int(os.getenv("RAG_AGENT_RO_CONNECT_TIMEOUT", "5"))
