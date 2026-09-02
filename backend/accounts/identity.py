@@ -104,7 +104,34 @@ def recall(user_id):
         return None
     if not record:
         return None
-    user = User(**{f: record[f] for f in _FIELDS if f in record})
+    # EVERY field must be present. `{f: record[f] for f in _FIELDS if f in record}`
+    # was the same fail-open shape as the SQL guard's table allowlist (ca69849):
+    # a filter applied before a security decision, where ABSENCE silently
+    # becomes a permissive default.
+    #
+    # Django's AbstractUser defaults is_active to TRUE, so a record missing that
+    # one key rebuilds a DISABLED account as an ACTIVE one. Measured:
+    #
+    #     complete record    -> is_active = False
+    #     record missing key -> is_active = True
+    #
+    # remember() always writes all of _FIELDS, so this needs a partial record —
+    # a truncated cache entry, or one written by an older deploy before _FIELDS
+    # gained a name. Both are ordinary, and neither should be able to reactivate
+    # a suspended account.
+    #
+    # Deny on unknown: an incomplete record is treated as no record at all, so
+    # the caller falls back to the database, which is authoritative anyway.
+    if not all(f in record for f in _FIELDS):
+        missing = sorted(set(_FIELDS) - set(record))
+        logger.warning(
+            "identity cache record for user_id=%s is missing %s — ignoring it "
+            "and falling back to the database",
+            user_id, ", ".join(missing),
+        )
+        return None
+
+    user = User(**{f: record[f] for f in _FIELDS})
     # Django treats a model instance with a pk as persisted; this one is not,
     # and marking it explicitly stops any accidental save() from inserting.
     user._state.adding = False

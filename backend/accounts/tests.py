@@ -749,3 +749,47 @@ class ListUsersAnswersWhoHasAccessTests(TestCase):
         self.assertNotIn(user.password, output)      # the hash itself
         self.assertNotIn("pbkdf2", output)
         self.assertNotIn("argon2", output)
+
+
+class IdentityCacheFailsClosedTests(TestCase):
+    """An incomplete cached identity record must not rebuild a permissive user.
+
+    recall() used to build the User from `{f: record[f] for f in _FIELDS
+    if f in record}` — a filter applied before a security decision, which is
+    the same fail-open shape as the SQL guard's table allowlist (ca69849).
+
+    Django's AbstractUser defaults is_active to True, so a record missing that
+    single key rebuilt a DISABLED account as an ACTIVE one. Measured before the
+    fix:
+
+        complete record    -> is_active = False
+        record missing key -> is_active = True
+
+    remember() writes every field, so reaching this needs a partial record: a
+    truncated cache entry, or one written by an older deploy before _FIELDS
+    gained a name. Neither should be able to reactivate a suspended account.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="suspended", password="irrelevant-for-this-test"
+        )
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+
+    def test_record_missing_a_field_is_refused(self):
+        record = {f: getattr(self.user, f) for f in identity._FIELDS}
+        del record["is_active"]
+        cache.set(identity._key(self.user.pk), record, 60)
+
+        # Deny on unknown: an incomplete record is treated as no record, so the
+        # caller falls back to the database, which is authoritative.
+        self.assertIsNone(identity.recall(self.user.pk))
+
+    def test_complete_record_still_round_trips(self):
+        # The fix must not break the cache it is protecting.
+        identity.remember(self.user)
+        recalled = identity.recall(self.user.pk)
+        self.assertIsNotNone(recalled)
+        self.assertEqual(recalled.username, "suspended")
+        self.assertFalse(recalled.is_active)
