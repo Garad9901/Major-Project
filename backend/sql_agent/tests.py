@@ -162,3 +162,59 @@ class WrongTableForFacultyCountsTests(SimpleTestCase):
             SYSTEM_PROMPT_TEMPLATE,
         )
         self.assertIn("SELECT email FROM faculty WHERE last_name", SYSTEM_PROMPT_TEMPLATE)
+
+
+class UnnamedDataSourceRejectionTests(SimpleTestCase):
+    """The allowlist used to FAIL OPEN on data sources that are not named tables.
+
+    A function used as a data source still parses to an exp.Table, but with an
+    EMPTY name. The old check filtered those out with `if t.name`, so the set of
+    referenced tables came out empty, and `empty_set - allowed` is empty — which
+    read as "nothing disallowed" and let the query through.
+
+    Measured against the guard before the fix:
+
+        SELECT 1                                       -> ALLOWED
+        SELECT * FROM OPENROWSET('SQLNCLI','x','...')  -> ALLOWED
+        SELECT * FROM OPENQUERY(linked,'SELECT 1')     -> ALLOWED
+
+    Inert under DIALECT="postgres" (no such functions — the query fails at
+    execution) and live under T-SQL, where these read remote servers, UNC paths
+    and local files AS THE DATABASE PROCESS. Being reads, they are not excluded
+    by the read-only principal or by DENY INSERT/UPDATE/DELETE.
+
+    These tests exist to fail loudly if the dialect switch reintroduces it.
+    """
+
+    UNNAMED_SOURCES = [
+        "SELECT * FROM OPENROWSET('SQLNCLI', 'Server=x;', 'SELECT 1')",
+        "SELECT * FROM OPENQUERY(linked_server, 'SELECT 1')",
+        "SELECT * FROM OPENDATASOURCE('SQLNCLI', 'Server=x;').db.dbo.t",
+    ]
+
+    def test_unnamed_data_sources_are_rejected(self):
+        for sql in self.UNNAMED_SOURCES:
+            with self.subTest(sql=sql):
+                with self.assertRaises(guard.SqlRejected):
+                    guard.validate_and_cap(sql, ALLOWED_TABLES)
+
+    def test_select_touching_no_table_is_rejected(self):
+        # The degenerate form of the same failure: a SELECT that reaches no
+        # table cannot be answering a question about the records.
+        with self.assertRaises(guard.SqlRejected):
+            guard.validate_and_cap("SELECT 1", ALLOWED_TABLES)
+
+    def test_remote_source_function_names_are_denied(self):
+        # Defence in depth: the same functions called somewhere OTHER than the
+        # FROM clause produce no exp.Table node, so the table checks never see
+        # them.
+        for fn in ("OPENROWSET", "OPENQUERY", "OPENDATASOURCE", "DBLINK"):
+            with self.subTest(fn=fn):
+                self.assertIn(fn, guard._FORBIDDEN_SOURCE_FUNCTIONS)
+
+    def test_legitimate_queries_still_pass(self):
+        # The fix must not narrow what the agent can legitimately do. A guard
+        # that rejects real questions gets relaxed by whoever is on call next.
+        table = sorted(ALLOWED_TABLES)[0]
+        out = guard.validate_and_cap(f"SELECT * FROM {table}", ALLOWED_TABLES)
+        self.assertIn(table, out.lower())

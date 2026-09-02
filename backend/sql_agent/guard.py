@@ -27,6 +27,25 @@ _HARD_FORBIDDEN_TOKEN_TYPES = {
 
 _CODE_FENCE_RE = re.compile(r"^```(?:sql)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
 
+# Functions that read data from OUTSIDE the current database. Each one turns a
+# permitted SELECT into a reader of remote servers, UNC paths or local files, at
+# the privilege of the database process rather than of our read-only principal.
+# Named explicitly because they are reads, so no amount of DENY INSERT/UPDATE/
+# DELETE on the login excludes them.
+#
+# T-SQL names are listed even though DIALECT is currently "postgres": the whole
+# reason this check exists is the pending migration, and a denylist that only
+# covers today's dialect would have to be remembered at exactly the moment
+# everything else is changing. dblink/postgres_fdw are the Postgres analogues.
+_FORBIDDEN_SOURCE_FUNCTIONS = {
+    "OPENROWSET",
+    "OPENQUERY",
+    "OPENDATASOURCE",
+    "OPENXML",
+    "DBLINK",
+    "DBLINK_EXEC",
+}
+
 
 class SqlRejected(Exception):
     pass
@@ -64,12 +83,70 @@ def validate_and_cap(raw_model_output, allowed_tables, max_limit=MAX_LIMIT):
     if hit_types:
         raise SqlRejected(f"query contains forbidden keyword(s): {', '.join(t.name for t in hit_types)}")
 
-    referenced_tables = {t.name.lower() for t in stmt.find_all(exp.Table) if t.name}
+    # EVERY data source must be a NAMED, allowlisted table.
+    #
+    # This check used to read:
+    #
+    #     referenced_tables = {t.name.lower() for t in ... if t.name}
+    #
+    # and the `if t.name` filter is what made it fail OPEN. A data source that
+    # is a FUNCTION rather than a named table still parses to an exp.Table, but
+    # with an EMPTY name — so the filter discarded it, the set came out empty,
+    # and `empty - allowed` is empty, so the query was allowed. "No forbidden
+    # table was named" was being treated as "every table named was permitted".
+    #
+    # Measured against the live guard before the fix:
+    #
+    #     SELECT 1                                       -> ALLOWED
+    #     SELECT * FROM OPENROWSET('SQLNCLI','x','...')  -> ALLOWED
+    #     SELECT * FROM OPENQUERY(linked,'SELECT 1')     -> ALLOWED
+    #
+    # Harmless under DIALECT="postgres", which has no such functions: the query
+    # dies at execution. It is NOT harmless under T-SQL, where OPENROWSET and
+    # OPENQUERY read remote data sources and files from the perspective of the
+    # SQL Server process. A read-only principal does not prevent that, because
+    # it is a read. This is fixed here, deliberately BEFORE the dialect switch,
+    # so it lands under the dialect we already understand and with the existing
+    # suite green behind it.
+    table_nodes = list(stmt.find_all(exp.Table))
+
+    unnamed = [t for t in table_nodes if not t.name]
+    if unnamed:
+        raise SqlRejected(
+            "query reads from an unnamed data source (a table-valued function "
+            "such as OPENROWSET/OPENQUERY); only named tables are allowed"
+        )
+
+    referenced_tables = {t.name.lower() for t in table_nodes}
+
+    # A SELECT that reaches no table at all cannot be answering a question about
+    # the records, and is the degenerate case of the failure above.
+    if not referenced_tables:
+        raise SqlRejected("query does not read from any table")
+
     allowed_lower = {t.lower() for t in allowed_tables}
     disallowed = referenced_tables - allowed_lower
     if disallowed:
         raise SqlRejected(
             f"query references table(s) outside the allowed schema: {', '.join(sorted(disallowed))}"
+        )
+
+    # Defence in depth: the same functions can appear as ordinary function calls
+    # rather than as a FROM source (in a projection or a WHERE subquery), where
+    # they produce no exp.Table node at all and the checks above never see them.
+    called = {
+        f.sql_name().upper()
+        for f in stmt.find_all(exp.Func)
+        if hasattr(f, "sql_name")
+    }
+    for node in stmt.find_all(exp.Anonymous):
+        name = node.args.get("this")
+        if isinstance(name, str):
+            called.add(name.upper())
+    remote = called & _FORBIDDEN_SOURCE_FUNCTIONS
+    if remote:
+        raise SqlRejected(
+            f"query calls a remote/external data-source function: {', '.join(sorted(remote))}"
         )
 
     return _cap_limit(stmt, max_limit).sql(dialect=DIALECT)
