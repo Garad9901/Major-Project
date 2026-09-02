@@ -1,0 +1,82 @@
+# Copyright (c) 2026 Yash Garad. All rights reserved.
+#
+# LOCAL DEVELOPMENT ONLY — a stand-in for the college's SQL Server.
+#
+# ==============================================================================
+# WHY THIS IS A SEPARATE FILE AND NOT A SERVICE IN docker-compose.yml
+# ==============================================================================
+# The college HAS a SQL Server. We read it; we do not ship one. Putting this in
+# the main compose file would mean the deployed system carries a database engine
+# it must never use, and someone would eventually point the application at it by
+# accident — which is precisely the "two sources of truth" failure the
+# two-database split in the migration plan exists to prevent.
+#
+# Kept separate so that:
+#   * the shipped compose files are untouched by the migration work
+#   * `docker compose -f docker-compose.yml -f docker-compose.prod.yml ...`
+#     continues to describe exactly what the college runs
+#   * this file can be deleted at the end of the migration without unpicking
+#     anything
+#
+# Usage (development machine only):
+#   docker compose -f docker-compose.yml -f docker-compose.mssql.yml up -d mssql
+#
+# ==============================================================================
+# MEMORY
+# ==============================================================================
+# SQL Server 2022 refuses to start below 2 GB and is documented as wanting more.
+# Measured on this laptop before adding it: 9.01 GiB in use of the 15.34 GiB the
+# Docker VM has, so roughly 6 GiB of headroom. 3 GiB is given here — enough for
+# the demo-shaped schema, and it leaves margin rather than consuming the lot.
+#
+# An explicit limit is set because the machine is already over-committed on
+# paper: the shipped compose files declare 17.75 GB of limits against a 15.34
+# GiB VM. That works only because nothing approaches its ceiling. An unbounded
+# database engine alongside a 7B model is how that stops being true.
+
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: majorproject3-mssql-1
+    environment:
+      ACCEPT_EULA: "Y"
+      # Developer edition: full Enterprise feature set, licensed for development
+      # and testing only. Change Tracking is included, which is the point — it
+      # is what unblocks Phase 4 without waiting on the college's DBA.
+      MSSQL_PID: "Developer"
+      # No default. An absent password fails the container rather than starting
+      # a database with a guessable one — the same posture as the secret guards
+      # in backend/config/secret_guards.py.
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env.mssql.local}
+    ports:
+      # Bound to LOOPBACK ONLY. The college's SQL Server must be reachable from
+      # the backend and from nowhere else; the development stand-in follows the
+      # same rule so the topology being developed against matches the one being
+      # deployed. "127.0.0.1:" is load-bearing — "1433:1433" alone would publish
+      # it on every interface.
+      - "127.0.0.1:1433:1433"
+    volumes:
+      - mssql_data:/var/opt/mssql
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+    healthcheck:
+      # sqlcmd moved in the 2022 image; both paths are tried so this does not
+      # silently never-pass on an image update.
+      test: >
+        /bin/bash -c "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa
+        -P \"$$MSSQL_SA_PASSWORD\" -No -Q 'SELECT 1' ||
+        /opt/mssql-tools/bin/sqlcmd -S localhost -U sa
+        -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1'"
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      # SQL Server's first start creates system databases and is slow.
+      start_period: 90s
+    restart: unless-stopped
+    networks:
+      - college_rag_net
+
+volumes:
+  mssql_data:

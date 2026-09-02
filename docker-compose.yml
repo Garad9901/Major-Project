@@ -396,6 +396,13 @@ services:
       # The one file a college fills in: name, logo, colours, contact address
       # and the web-fetch allowlist. See config/institution.example.json.
       INSTITUTION_CONFIG: /etc/college-assistant/institution.json
+      # The one place the college's physical table names are recorded.
+      # Mounted from the same directory as institution.json rather than
+      # resolved relative to the source tree: the repo-relative default in
+      # common/schema_map.py points at <repo>/config, which does not exist
+      # inside the image (the backend is COPYed to /app, so /app/../config
+      # resolves to /config and is empty).
+      SCHEMA_MAP: /etc/college-assistant/schema_map.json
       # Demo data is OPT-IN. A production install starts empty and is populated
       # by the operator's own import; shipping 13,000 rows of invented faculty
       # into a real deployment would be indefensible. Set true for an evaluation

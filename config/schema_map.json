@@ -1,0 +1,65 @@
+{
+  "_doc": [
+    "THE ONE PLACE THE COLLEGE'S PHYSICAL SCHEMA IS NAMED.",
+    "",
+    "Everything that needs to reach a college table - the SQL agent's prompt and",
+    "table allowlist, schema introspection, the read-only grants, the sync",
+    "worker's subscriptions, and the deterministic fast path - resolves names",
+    "through this file. Nothing else may contain a literal college table name.",
+    "",
+    "WHY: the real college schema is not known yet. The current names are the",
+    "demo shape. When the real names arrive, adapting the system is editing this",
+    "file and re-running the suite, rather than auditing 15k lines for string",
+    "literals. That is the whole point, and it is why 'just rename the tables'",
+    "is not an acceptable substitute.",
+    "",
+    "TODAY this maps every logical name to an IDENTICAL physical name, so the",
+    "system behaves exactly as it did before the adapter existed. A test asserts",
+    "that the derived allowlist equals the previous hardcoded list, so the",
+    "adapter cannot silently widen or narrow what the model can read.",
+    "",
+    "FIELDS",
+    "  schema   - the owning schema. 'public' on Postgres, 'dbo' on SQL Server.",
+    "  physical - the physical table name in the college database.",
+    "  columns  - logical column name -> physical column name. Only columns that",
+    "             code refers to BY NAME need an entry; introspection discovers",
+    "             the rest. Empty today because the current code refers to no",
+    "             college column by literal name outside generated SQL.",
+    "",
+    "SECURITY: this file is an ALLOWLIST. A table absent from it is unreachable",
+    "by the SQL agent. Adding an entry widens what the language model can read,",
+    "so additions are a security decision, not a configuration tweak. The",
+    "deliberately-absent tables are listed at the bottom under _excluded."
+  ],
+
+  "default_schema": "public",
+
+  "tables": {
+    "departments":        { "physical": "departments",        "columns": {} },
+    "faculty":            { "physical": "faculty",            "columns": {} },
+    "programs":           { "physical": "programs",           "columns": {} },
+    "courses":            { "physical": "courses",            "columns": {} },
+    "courses_prerequisites": { "physical": "courses_prerequisites", "columns": {} },
+    "course_offerings":   { "physical": "course_offerings",   "columns": {} },
+    "rooms":              { "physical": "rooms",              "columns": {} },
+    "class_schedule":     { "physical": "class_schedule",     "columns": {} },
+    "exam_timetable":     { "physical": "exam_timetable",     "columns": {} },
+    "fee_structure":      { "physical": "fee_structure",      "columns": {} },
+    "faculty_development": { "physical": "faculty_development", "columns": {} },
+    "faculty_development_profiles": { "physical": "faculty_development_profiles", "columns": {} }
+  },
+
+  "_excluded": {
+    "_doc": [
+      "Tables the college database contains that this system must NOT read.",
+      "Recorded here so the exclusion is a visible decision with a reason,",
+      "rather than an absence somebody later reads as an oversight and 'fixes'.",
+      "These names are never resolved and never reach the allowlist."
+    ],
+    "students": "personal records; the assistant answers about the institution, not about individuals",
+    "enrollments": "identifies a named student with a named course",
+    "attendance": "per-student behavioural data",
+    "exam_results": "per-student marks",
+    "fee_payments": "per-student financial data"
+  }
+}
