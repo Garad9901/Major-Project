@@ -18,6 +18,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc \
     && rm -rf /var/lib/apt/lists/*
 
+# Microsoft's ODBC driver, for the college's SQL Server.
+#
+# The application's own storage stays on Postgres, so libpq-dev above is still
+# required - this is the SECOND database connection, read-only, for the
+# college's academic records. See docs/MSSQL_MIGRATION_PLAN.md for the split.
+#
+# ACCEPT_EULA is required by the package and is scoped to this install only.
+#
+# The repository key is fetched into a keyring FILE rather than piped through
+# apt-key, which is deprecated and would trust the key for every repository on
+# the system. signed-by scopes it so it authenticates only Microsoft packages.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl gnupg ca-certificates \
+ && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+      | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" \
+      > /etc/apt/sources.list.d/mssql-release.list \
+ && apt-get update \
+ && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 unixodbc-dev \
+ && apt-get purge -y --auto-remove gnupg \
+ && rm -rf /var/lib/apt/lists/*
+
 # BOTH files are copied, but only the lock is installed.
 #
 # requirements.txt states intent with loose floors and is what a human edits;

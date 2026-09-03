@@ -16,3 +16,15 @@ requests>=2.32
 # DRF throttle counters. Django ships the cache backend itself; this is the
 # client library it imports.
 redis>=5.0
+
+# The MS SQL Server driver, for the college's own database.
+#
+# The application's OWN storage stays on Postgres (accounts, sessions,
+# conversation history, audit) — see docs/MSSQL_MIGRATION_PLAN.md for why the
+# split is by ownership. psycopg2 is therefore still required and not replaced.
+#
+# pyodbc rather than mssql-django: the SQL agent talks to the college database
+# through a raw read-only connection with its own pool, not through the Django
+# ORM, so the ORM backend would add a dependency without being used on that
+# path.
+pyodbc>=5.3
