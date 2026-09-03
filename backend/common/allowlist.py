@@ -25,31 +25,39 @@ General institutional data ONLY. Per-student tables — students, enrollments,
 attendance, exam_results, fee_payments — are deliberately absent, and adding one
 here would immediately widen what the language model can read. Django's own
 auth_*/django_* tables are excluded too: they are not college data.
+
+WHERE THE NAMES NOW COME FROM
+The list itself lives in config/schema_map.json, which maps the logical name
+this codebase uses to the physical name in the college's database. This module
+still owns the POLICY — what may be read and what each table means — while the
+map owns the NAMES. When the real college schema arrives, the map changes and
+this file does not.
 """
 
-# Order is meaningful only for prompt readability (schema.py renders in this
-# order); the grants and the sync worker are order-independent.
-ALLOWED_TABLES = [
-    "departments",
-    "faculty",
-    "programs",
-    "courses",
-    "courses_prerequisites",
-    "course_offerings",
-    "rooms",
-    "class_schedule",
-    "exam_timetable",
-    "fee_structure",
-    # --- imported faculty development dataset (see academics/models.py) -------
-    # Anonymised survey data: 13,000 rows keyed by an opaque "FAC_00001" code
-    # with no names, emails or any means of identifying a person. It is
-    # institutional analytics, not per-student data, so it belongs here.
-    "faculty_development",
-    # Prose summaries generated from the table above; this is what the RAG path
-    # actually retrieves. Readable by the SQL agent too, so it can answer
-    # "how many profile documents are there" style questions coherently.
-    "faculty_development_profiles",
-]
+from common import schema_map
+
+# DERIVED FROM THE SCHEMA MAP — config/schema_map.json is the source.
+#
+# This was a literal list, kept in step with the map by a test that compared
+# them. Two lists that must agree are a drift bug with a delay on it: the test
+# catches disagreement only if someone runs it, and the failure mode is either a
+# table the model can no longer read (visible) or one it can read that nobody
+# allowlisted (not visible). One source with a derived view cannot drift.
+#
+# Order still comes from the map, and still matters: schema.py renders the
+# prompt in this order, so a reordering changes the prompt prefix and
+# invalidates the prefix-cache figures in docs/LATENCY.md even when the set is
+# identical.
+#
+# The tables that used to carry a comment here keep it in the map's _doc, and
+# the deliberately-EXCLUDED per-student tables are recorded in the map under
+# _excluded with a reason each — so the exclusion reads as a decision rather
+# than an oversight somebody later "fixes".
+#
+# Fails closed: a missing, malformed or empty map raises at import rather than
+# yielding an empty allowlist. See common/schema_map.py for why that is not
+# defensive programming but the direct lesson of ca69849 and 517a71c.
+ALLOWED_TABLES = schema_map.physical_tables()
 
 # One-line statement of what each table IS, rendered into the text-to-SQL
 # prompt above its column list by sql_agent/schema.py.

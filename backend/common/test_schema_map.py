@@ -28,12 +28,43 @@ from common import schema_map
 from common.allowlist import ALLOWED_TABLES
 
 
+# The allowlist as it stood BEFORE the schema map existed, written out here
+# deliberately.
+#
+# ALLOWED_TABLES is now DERIVED from the map, so asserting the two are equal
+# would compare the map with itself and pass no matter what either contained.
+# This literal is the independent witness: it is what the system allowed on the
+# day the adapter landed, and any edit to config/schema_map.json that changes
+# what the language model may read has to change this line too, in a diff a
+# reviewer will see.
+#
+# Order is part of the assertion. schema.py renders the prompt in this order, so
+# a reordering changes the prompt prefix and invalidates the prefix-cache
+# figures in docs/LATENCY.md even when the set is identical.
+_ALLOWLIST_AT_ADAPTER_LANDING = [
+    "departments",
+    "faculty",
+    "programs",
+    "courses",
+    "courses_prerequisites",
+    "course_offerings",
+    "rooms",
+    "class_schedule",
+    "exam_timetable",
+    "fee_structure",
+    "faculty_development",
+    "faculty_development_profiles",
+]
+
+
 class DerivedAllowlistIsUnchangedTests(SimpleTestCase):
-    def test_physical_tables_match_the_previous_hardcoded_list_exactly(self):
-        # Order included: schema.py renders the prompt in this order, so a
-        # reordering would change the prompt and invalidate the prefix cache
-        # measurements in docs/LATENCY.md even though the set is the same.
-        self.assertEqual(schema_map.physical_tables(), list(ALLOWED_TABLES))
+    def test_map_still_yields_the_allowlist_the_system_shipped_with(self):
+        self.assertEqual(schema_map.physical_tables(), _ALLOWLIST_AT_ADAPTER_LANDING)
+
+    def test_allowed_tables_is_the_derived_view_of_the_map(self):
+        # Not tautological in the useful direction: this pins that allowlist.py
+        # exposes the map rather than a second literal that could drift.
+        self.assertEqual(list(ALLOWED_TABLES), schema_map.physical_tables())
 
     def test_every_allowlisted_table_resolves(self):
         for name in ALLOWED_TABLES:

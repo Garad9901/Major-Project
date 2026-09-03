@@ -1,12 +1,35 @@
 # Copyright (c) 2026 Yash Garad. All rights reserved.
 
+import os
 import re
 
 import sqlglot
 from sqlglot import exp
 from sqlglot.tokens import Tokenizer, TokenType
 
-DIALECT = "postgres"
+from common import schema_map
+
+# The dialect the guard PARSES AND RENDERS in. It must match the database the
+# generated SQL will actually run against: parsing T-SQL as Postgres (or the
+# reverse) silently changes what the parser accepts, and this parser IS the
+# security boundary.
+#
+# Selectable because both backends stay green during the migration — Postgres
+# remains the calibration baseline for every measurement in docs/ until the
+# real college schema is in and the port is proven.
+#
+# Fails closed on an unknown value rather than falling back to a default: an
+# unrecognised dialect would otherwise be silently parsed by whatever sqlglot
+# treats as generic, which accepts a broader grammar than either real backend.
+_SUPPORTED_DIALECTS = ("postgres", "tsql")
+DIALECT = (os.getenv("SQL_DIALECT", "").strip().lower() or "postgres")
+if DIALECT not in _SUPPORTED_DIALECTS:
+    raise RuntimeError(
+        f"SQL_DIALECT={DIALECT!r} is not one of {_SUPPORTED_DIALECTS}. "
+        "Refusing to start: the guard parses in this dialect, so an unknown "
+        "value would validate the model's SQL against a grammar that matches "
+        "no database this system talks to."
+    )
 MAX_LIMIT = 50  # hard cap — not env-configurable on purpose, see README note in service.py
 
 # The literal 5 keywords called out as a hard requirement. Enforced twice:
@@ -45,6 +68,49 @@ _FORBIDDEN_SOURCE_FUNCTIONS = {
     "DBLINK",
     "DBLINK_EXEC",
 }
+
+# Functions that EXECUTE rather than read. Distinct from the set above because
+# the reason differs: these do not read a remote source, they run a command.
+#
+# xp_cmdshell as a FROM source is already caught (it is not an allowlisted
+# table), but as a PROJECTION it is not:
+#
+#     SELECT xp_cmdshell('whoami') FROM courses
+#
+# parses to a Select over the allowlisted `courses`, with the call in the select
+# list where no table check ever sees it. Measured: this passed the allowlist.
+#
+# The read-only principal DENYs EXECUTE, so this is defence in depth rather than
+# the only thing standing in the way — but "the database would have refused it"
+# is exactly the reasoning that made the OPENROWSET hole look harmless.
+_FORBIDDEN_EXEC_FUNCTIONS = {
+    "XP_CMDSHELL",
+    "SP_EXECUTESQL",
+    "SP_OACREATE",
+    "SP_OAMETHOD",
+    "XP_DIRTREE",
+    "XP_FILEEXIST",
+    "XP_REGREAD",
+}
+
+
+# Schema qualifiers the guard will accept on a table reference. Taken from the
+# schema map so that "which schema is legitimate" has one source: `public` on
+# Postgres, `dbo` on SQL Server, whatever the college actually uses when the
+# real map lands. Anything else is treated as a cross-database reference.
+#
+# The dialect's own default schema is included as well as the map's. Both
+# backends stay green during the migration, so the same map is read while
+# DIALECT is either "postgres" or "tsql", and `dbo.courses` is an ordinary
+# same-database reference on SQL Server exactly as `public.courses` is on
+# Postgres. Neither admits `master.dbo.courses`, which carries a CATALOG and is
+# refused before the schema is even considered.
+_DIALECT_DEFAULT_SCHEMA = {"postgres": "public", "tsql": "dbo"}
+
+_ALLOWED_SCHEMAS = ({
+    (spec.get("schema") or "").lower()
+    for spec in (schema_map._TABLES.values())
+} | {_DIALECT_DEFAULT_SCHEMA[DIALECT]}) - {""}
 
 
 class SqlRejected(Exception):
@@ -117,6 +183,44 @@ def validate_and_cap(raw_model_output, allowed_tables, max_limit=MAX_LIMIT):
             "such as OPENROWSET/OPENQUERY); only named tables are allowed"
         )
 
+    # THE ALLOWLIST MUST SEE THE WHOLE IDENTIFIER, NOT JUST THE LAST PART.
+    #
+    # `t.name` is only the final component. A T-SQL four-part name
+    # server.database.schema.object therefore reduced to an allowlisted table
+    # name while pointing somewhere else entirely. Measured before this check:
+    #
+    #     SELECT * FROM linked_evil.master.dbo.faculty   -> PASSES allowlist
+    #                   name='faculty' catalog='linked_evil' db='master'
+    #
+    # Under T-SQL that reads from a LINKED SERVER, at the privilege of the SQL
+    # Server process rather than of our read-only principal — the same escape as
+    # OPENROWSET, reached by a different route. It is the identical shape to the
+    # bug fixed in ca69849: an identifier check that inspects only part of the
+    # identifier.
+    #
+    # Benign under Postgres, where a cross-database name fails at execution.
+    # Live the moment DIALECT becomes "tsql", which is why it is fixed here
+    # rather than left to be noticed later.
+    #
+    # A catalog qualifier is refused outright. A schema qualifier is allowed
+    # only when it is one the schema map actually declares, so `dbo.faculty`
+    # works on SQL Server and `public.faculty` on Postgres without either
+    # opening a door to `master.dbo.faculty`.
+    qualified = []
+    for t in table_nodes:
+        catalog = (t.catalog or "").strip()
+        db = (t.db or "").strip()
+        if catalog:
+            qualified.append(t.sql(dialect=DIALECT))
+        elif db and db.lower() not in _ALLOWED_SCHEMAS:
+            qualified.append(t.sql(dialect=DIALECT))
+    if qualified:
+        raise SqlRejected(
+            "query names a table outside the current database "
+            f"({', '.join(sorted(qualified))}); cross-database and linked-server "
+            "references are not allowed"
+        )
+
     referenced_tables = {t.name.lower() for t in table_nodes}
 
     # A SELECT that reaches no table at all cannot be answering a question about
@@ -147,6 +251,12 @@ def validate_and_cap(raw_model_output, allowed_tables, max_limit=MAX_LIMIT):
     if remote:
         raise SqlRejected(
             f"query calls a remote/external data-source function: {', '.join(sorted(remote))}"
+        )
+
+    executing = called & _FORBIDDEN_EXEC_FUNCTIONS
+    if executing:
+        raise SqlRejected(
+            f"query calls a command-execution procedure: {', '.join(sorted(executing))}"
         )
 
     return _cap_limit(stmt, max_limit).sql(dialect=DIALECT)
