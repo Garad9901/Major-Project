@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Yash Garad. All rights reserved.
 
-from django.core.management.base import BaseCommand
+from common.devonly import DevelopmentOnlyCommand
 
 from sql_agent.service import ask
 
@@ -13,7 +13,9 @@ TEST_QUESTIONS = [
 ]
 
 
-class Command(BaseCommand):
+class Command(DevelopmentOnlyCommand):
+    dev_only_reason = "it runs an agent against whatever database it is pointed at"
+
     help = (
         "Runs 5 canned test questions through the SQL agent and prints the "
         "generated SQL for review. By default this ONLY generates and "

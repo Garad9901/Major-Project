@@ -3,7 +3,7 @@
 from datetime import date, time
 from decimal import Decimal
 
-from django.core.management.base import BaseCommand
+from common.devonly import DevelopmentOnlyCommand
 from django.db import transaction
 
 from academics.models import (
@@ -170,7 +170,9 @@ FEES = [
 ]
 
 
-class Command(BaseCommand):
+class Command(DevelopmentOnlyCommand):
+    dev_only_reason = "it writes fabricated college records into the database"
+
     help = "Wipe and reseed the academics tables with a consistent demo dataset."
 
     def add_arguments(self, parser):

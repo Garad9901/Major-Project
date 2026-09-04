@@ -4,6 +4,36 @@ import logging
 
 import psycopg2
 
+# THE DRIVER'S OWN "the connection died" EXCEPTIONS, FOR BOTH BACKENDS.
+#
+# This module caught psycopg2.OperationalError by name. pyodbc raises a
+# DIFFERENT type for the same condition, so on the T-SQL path the exception
+# would have escaped this handler, missed the DatabaseUnavailable wrapping the
+# orchestrator degrades on, and surfaced as an unhandled 500.
+#
+# The path only runs when the database is ALREADY DOWN, which is the worst
+# possible time to discover it and the reason it would not have been noticed:
+# every test and every healthy request skips it.
+#
+# The pyodbc class was OBSERVED, not inferred. Against a genuinely stopped SQL
+# Server container:
+#
+#     class    : OperationalError
+#     mro      : OperationalError -> DatabaseError -> Error -> Exception
+#     sqlstate : HYT00  ("Login timeout expired")
+#
+# Both are listed unconditionally rather than switched on the active dialect:
+# the tuple costs nothing, and a handler that is correct only when a second
+# variable is set correctly is a handler with a way to be wrong.
+_DRIVER_OPERATIONAL_ERRORS = [psycopg2.OperationalError]
+try:  # pragma: no cover - depends on which driver is installed
+    import pyodbc
+
+    _DRIVER_OPERATIONAL_ERRORS.append(pyodbc.OperationalError)
+except ImportError:
+    pass
+_DRIVER_OPERATIONAL_ERRORS = tuple(_DRIVER_OPERATIONAL_ERRORS)
+
 from common.exceptions import DatabaseUnavailable
 
 from . import db, executor, guard, llm_client, schema
@@ -41,7 +71,7 @@ def ask(question, execute=True, history_block=""):
     try:
         with db.connection() as conn:
             schema_text = schema.build_schema_text(conn)
-    except psycopg2.OperationalError as exc:
+    except _DRIVER_OPERATIONAL_ERRORS as exc:
         raise DatabaseUnavailable(f"database connection lost during schema read: {exc}") from exc
 
     raw_output = llm_client.generate_sql(question, schema_text, history_block=history_block)

@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Yash Garad. All rights reserved.
 
-from django.core.management.base import BaseCommand
+from common.devonly import DevelopmentOnlyCommand
 
 from rag_agent.service import retrieve
 from sql_agent.service import ask as sql_ask
@@ -24,7 +24,9 @@ TEST_CASES = [
 ]
 
 
-class Command(BaseCommand):
+class Command(DevelopmentOnlyCommand):
+    dev_only_reason = "it runs an agent against whatever database it is pointed at"
+
     help = (
         "Runs 5 test cases through the real SQL and/or RAG agents (per each "
         "case's route) and feeds their actual outputs into the synthesis "

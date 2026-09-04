@@ -116,6 +116,34 @@ def find_secret_problems(env=None):
                 f"cookies, so a short key means forgeable logins."
             )
 
+    # TLS VALIDATION ON THE COLLEGE DATABASE CONNECTION.
+    #
+    # Not a secret, but a credential-grade misconfiguration, and it belongs here
+    # for the same reason the default-password check does: it should stop the
+    # process rather than produce a log line nobody reads.
+    #
+    # ODBC Driver 18 defaults to Encrypt=yes and validates the certificate. A
+    # development SQL Server is self-signed, so the connection fails, and the
+    # fix every search result offers is TrustServerCertificate=yes. That works,
+    # and in production it disables certificate validation on the connection
+    # carrying every student record across the college network — anything in
+    # path can present any certificate and read or alter the traffic. Nothing
+    # complains, because from the application's side it is working.
+    #
+    # Same shape as the HSTS defect: local convenience indistinguishable from
+    # production weakness. Allowed in development, refused here.
+    if (env.get("MSSQL_TRUST_SERVER_CERTIFICATE") or "").strip().lower() in (
+        "1", "yes", "true", "on",
+    ):
+        problems.append(
+            "MSSQL_TRUST_SERVER_CERTIFICATE is enabled. That disables TLS "
+            "certificate validation on the connection to the college database, "
+            "so anything in path on their network can read or alter every "
+            "record it carries. It is a development-only setting for a "
+            "self-signed local server. Install the college SQL Server's "
+            "certificate on this machine instead — see the runbook."
+        )
+
     return problems
 
 

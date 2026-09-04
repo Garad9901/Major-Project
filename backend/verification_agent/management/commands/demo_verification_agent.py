@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Yash Garad. All rights reserved.
 
-from django.core.management.base import BaseCommand
+from common.devonly import DevelopmentOnlyCommand
 from django.db.models import Count
 
 from rag_agent.service import retrieve
@@ -34,7 +34,9 @@ INJECTED_HALLUCINATIONS = [
 ]
 
 
-class Command(BaseCommand):
+class Command(DevelopmentOnlyCommand):
+    dev_only_reason = "it runs an agent against whatever database it is pointed at"
+
     help = (
         "Runs 10 test cases through the verification agent: 5 genuine "
         "synthesis answers (checking for false positives) and the same 5 "

@@ -26,7 +26,9 @@ creating the schema is the one job that is not read-only.
 
 import os
 
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import CommandError
+
+from common.devonly import DevelopmentOnlyCommand
 from django.db import connection
 
 from common import schema_map
@@ -73,7 +75,9 @@ def _tsql_type(data_type, char_max_len, numeric_precision, numeric_scale):
         ) from None
 
 
-class Command(BaseCommand):
+class Command(DevelopmentOnlyCommand):
+    dev_only_reason = "it connects as `sa` and DROPs and recreates tables"
+
     help = "Mirror the allowlisted Postgres tables into the local SQL Server (development only)."
 
     def add_arguments(self, parser):
@@ -88,13 +92,13 @@ class Command(BaseCommand):
                 "refusing to run without MSSQL_MIRROR_ALLOW=yes. This command "
                 "DROPs and recreates tables in the target database."
             )
+        # The hostname heuristic that used to live here has been REMOVED. It
+        # asked whether a string looked like a college server, which is a guess,
+        # not a control. DevelopmentOnlyCommand now refuses on DJANGO_ENV — the
+        # same variable that selects the settings module — and the SA password
+        # lives only in .env.mssql.local, so on production this command cannot
+        # function even if it somehow runs. See common/devonly.py.
         host = os.getenv("MSSQL_HOST", "mssql")
-        if any(m in host.lower() for m in ("prod", "college", ".edu", ".ac.")):
-            raise CommandError(
-                f"MSSQL_HOST={host!r} looks like a real college server. This "
-                "command drops tables; it must only ever point at a local "
-                "development instance."
-            )
 
         try:
             import pyodbc
