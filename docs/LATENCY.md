@@ -450,6 +450,35 @@ wrong.
 
 ### 2. Prefix caching is already working, and is load-bearing
 
+> **SUPERSEDED — 5 September 2026. The token counts and prefill timings in this
+> section describe a prompt the code no longer produces.**
+>
+> Two changes to the SQL agent's prompt prefix have landed since these were
+> measured:
+>
+> 1. **`e3a7c27` — foreign keys now reach the prompt.** `build_schema_text`
+>    renders `REFERENCES` clauses from introspected constraints, and it had been
+>    reading a privilege-filtered view that returned NOTHING to the read-only
+>    role the agent connects as. Twelve `REFERENCES` clauses now appear in the
+>    schema text that were absent when these figures were taken.
+> 2. **The T-SQL dialect switch**, which changes the system prompt's stated
+>    dialect and its worked examples.
+>
+> The MECHANISM these measurements established — that prefix caching works, that
+> a repeat prompt prefills in the low hundreds of milliseconds, and that an
+> interleaved call from another model does not evict it — is unaffected. The
+> NUMBERS are not: any figure below that counts prompt tokens, or times a
+> prefill over a specific token count, describes the old prefix.
+>
+> This is marked rather than deleted, and marked at the moment the prefix
+> changed rather than at the next convenient moment, because the same defect
+> class — a document asserting a value the code no longer produces — is one this
+> project has corrected twice already, in the audit report and in the HSTS ramp.
+>
+> Re-measurement covering both changes follows in this document once the dialect
+> switch has landed.
+
+
 Same synthesis-shaped prompt, three times, then interleaved with other models:
 
 | call | prompt tokens | prefill | rate |

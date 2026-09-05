@@ -62,14 +62,35 @@ def _run_query_tsql(sql):
     equivalent (a Resource Governor pool) is server configuration the college
     owns, not something this application may impose.
 
-    So the bound is applied CLIENT-side, via pyodbc's cursor timeout, and the
-    difference is worth stating plainly rather than papering over: a client-side
-    timeout stops us WAITING, it does not stop the SERVER working. A runaway
-    query keeps consuming the college's CPU after we have given up on it.
+    So the bound is applied CLIENT-side, via pyodbc's timeout, which maps to
+    ODBC's SQL_ATTR_QUERY_TIMEOUT.
 
-    That is a weaker guarantee than the Postgres path has. It is mitigated by
-    the row cap in guard.py and by the read-only login, and the honest fix is a
-    Resource Governor limit their DBA sets — a Phase 7 runbook item.
+    AN EARLIER VERSION OF THIS COMMENT SAID THAT ONLY STOPS US WAITING WHILE THE
+    SERVER KEEPS WORKING. THAT WAS WRONG, AND MEASURING IT SAID SO. Against a
+    triple cross join over the 13,000-row table, counting rag_agent_ro requests
+    in sys.dm_exec_requests from a second connection:
+
+        client timeout fires (3.1s)      -> 0 still executing 2s later
+        client process SIGKILLed mid-run -> 0 still executing 5s later
+
+    On timeout the driver sends an attention signal and SQL Server aborts the
+    batch. On a killed client the socket closes and the server notices that too.
+    Neither leaves the college's CPU burning.
+
+    THE RESIDUAL GAP IS NARROWER AND WORTH STATING PRECISELY: if the connection
+    is severed WITHOUT a clean close — a network partition, a dropping firewall —
+    there is nobody to send the attention and no FIN to observe, so SQL Server
+    waits on TCP keepalive, which is measured in hours by default. Postgres's
+    statement_timeout still fires there, because the server enforces it
+    autonomously with no help from the client.
+
+    NOT MEASURED: that partition case. Simulating it needs network-level
+    interference this environment cannot produce, so it is reasoned from the
+    protocol rather than observed, and is flagged as such.
+
+    Resource Governor is still the right answer for that case, and it is a
+    Phase 7 runbook item for the DBA — but it is materially less urgent than
+    the earlier wording implied.
 
     QUERY_TIMEOUT is set on the CONNECTION rather than the cursor because
     pyodbc applies it there; it is reset in the finally so a pooled connection
