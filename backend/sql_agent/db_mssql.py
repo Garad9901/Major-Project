@@ -163,11 +163,48 @@ def _connection_string():
     return ";".join(parts) + ";"
 
 
+# SQL_SS_TIMESTAMPOFFSET. pyodbc has no built-in conversion for it and raises
+#
+#     ODBC SQL type -155 is not yet supported.  column-index=N
+#
+# on ANY row containing a DATETIMEOFFSET column. Postgres's `timestamp with time
+# zone` maps to exactly that type, and most tables here carry created_at /
+# updated_at, so `SELECT *` on them failed outright on the T-SQL path while the
+# equivalent Postgres query worked.
+#
+# Found by running the guard's allow-cases through the REAL EXECUTOR rather than
+# the parser: the query is valid, the guard passes it, the server runs it, and
+# the DRIVER fails converting the result. No amount of SQL-level testing would
+# have surfaced it.
+_SQL_SS_TIMESTAMPOFFSET = -155
+
+
+def _handle_datetimeoffset(raw):
+    """Decode SQL Server's DATETIMEOFFSET wire format into an aware datetime.
+
+    The layout is fixed by the protocol: six 16-bit fields (year, month, day,
+    hour, minute, second), a 32-bit nanosecond fraction, then signed hour and
+    minute offsets.
+    """
+    import struct
+    from datetime import datetime, timedelta, timezone
+
+    year, month, day, hour, minute, second, nanos, tz_hour, tz_minute = struct.unpack(
+        "<6hI2h", raw
+    )
+    return datetime(
+        year, month, day, hour, minute, second, nanos // 1000,
+        tzinfo=timezone(timedelta(hours=tz_hour, minutes=tz_minute)),
+    )
+
+
 def _connect():
     import pyodbc
 
     try:
-        return pyodbc.connect(_connection_string(), timeout=CONNECT_TIMEOUT_S)
+        conn = pyodbc.connect(_connection_string(), timeout=CONNECT_TIMEOUT_S)
+        conn.add_output_converter(_SQL_SS_TIMESTAMPOFFSET, _handle_datetimeoffset)
+        return conn
     except pyodbc.Error as exc:
         # A MISSING DRIVER MUST NOT LOOK LIKE A NETWORK FAULT.
         #
