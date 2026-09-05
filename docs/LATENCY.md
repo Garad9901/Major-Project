@@ -475,8 +475,37 @@ wrong.
 > class — a document asserting a value the code no longer produces — is one this
 > project has corrected twice already, in the audit report and in the HSTS ramp.
 >
-> Re-measurement covering both changes follows in this document once the dialect
-> switch has landed.
+> Re-measurement covering both changes is below.
+
+#### Re-measured, 5 September 2026 — SQL agent prompt
+
+After the foreign-key fix (`e3a7c27`) and the dialect switch (`88a9c64`).
+`qwen2.5:7b`, `temperature 0`, Postgres dialect, schema text 6,194 chars with
+12 `REFERENCES` clauses, full system prompt 8,384 chars.
+
+| call | prompt tokens | prefill | implied prefill tok/s | gen tok/s |
+|---|---|---|---|---|
+| cold (first) | 1,776 | 54,418 ms | 33 | 7.6 |
+| repeat | 1,776 | **472 ms** | 3,760 | 7.2 |
+| repeat | 1,776 | **126 ms** | 14,058 | 7.5 |
+| different question, same prefix | 1,774 | 747 ms | 2,374 | 8.2 |
+
+**The mechanism is unchanged: prefix caching still works and is still
+load-bearing.** A repeat prefills in the low hundreds of milliseconds against 54
+seconds cold, and a different question sharing the same system prompt still
+benefits — which is the property that matters, since consecutive users ask
+different questions against an identical schema block.
+
+The implied rates above 1,000 tok/s are not real throughput. `prompt_eval_count`
+reports the WHOLE prompt while `prompt_eval_duration` covers only the UNCACHED
+part; the absurd number IS the evidence of a cache hit. Genuine uncached prefill
+is the cold row: **33 tok/s**, consistent with the 26–33 tok/s recorded before
+these changes.
+
+Generation is **7.2–8.2 tok/s**, also unchanged. Neither change moved the
+hardware's speed, which is expected — they changed what the prompt SAYS, not how
+fast the machine reads it.
+
 
 
 Same synthesis-shaped prompt, three times, then interleaved with other models:

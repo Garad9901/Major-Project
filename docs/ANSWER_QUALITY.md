@@ -341,3 +341,86 @@ under the production CPU limit is ~26 tok/s, which would put 1,700 fresh tokens
 at roughly 65 seconds — so the prefix is being reused and the examples are paid
 once per model load, not per question. Same reasoning that kept the
 untrusted-content nonce out of the system prompt; see docs/LATENCY.md.
+
+---
+
+## Foreign keys in the prompt: measured, and it did not do what was expected — 5 September 2026
+
+`e3a7c27` fixed a defect present for the entire life of this project:
+`build_schema_text` read `information_schema.constraint_column_usage`, which is
+privilege-filtered and returned **nothing** to the read-only role the SQL agent
+connects as. Measured:
+
+```
+as rag_agent_ro:  0 FK rows visible
+as owner:        30 FK rows visible
+```
+
+So the model had never been shown a single relationship, on any deployment, and
+inferred every join key from column names.
+
+The reasonable expectation was that showing it 12 `REFERENCES` clauses would
+improve join accuracy, and that the improvement belonged in the audit report as
+a finding. **It did not improve materially, and the honest answer is more useful
+than the expected one.**
+
+### Method
+
+Eight counting questions that each require at least one join, with the correct
+answer computed directly in SQL rather than judged by plausibility. The ONLY
+difference between conditions is whether the `REFERENCES` clauses appear in the
+schema block — same questions, same model (`qwen2.5:7b`), `temperature 0`, same
+prompt otherwise. "Before" is produced by stripping `REFERENCES` from the
+generated schema text, which reproduces exactly what shipped.
+
+### Result
+
+| | correct |
+|---|---|
+| before (0 REFERENCES — as shipped) | **5 / 8** |
+| after (12 REFERENCES) | **6 / 8** |
+
+**One question out of eight. At n=8 in a single run, that is not distinguishable
+from noise, and it must not be reported as a quality gain.**
+
+### The part that matters more than the delta
+
+One question got **worse in the direction this system cares most about**.
+
+"How many timetable slots are there for Computer Science courses?" — before, the
+model wrote SQL referencing a column that does not exist and the query ERRORED.
+After, seeing that `course_offerings.instructor_id REFERENCES faculty(id)`, it
+followed that relationship instead of the course→department one and produced:
+
+```sql
+SELECT COUNT(*) FROM class_schedule
+WHERE course_offering_id IN (SELECT id FROM course_offerings WHERE instructor_id ...)
+```
+
+which returned **0** against a true answer of 3.
+
+An error is visible: the user is told the lookup failed. A confident `0` is not:
+the user is told there are no timetable slots, which is false. **The extra
+information moved one answer from "visibly broken" to "quietly wrong",** which is
+the worst outcome class this system has.
+
+### What this does and does not justify
+
+It does **not** justify reverting the fix. The prompt should describe the schema
+truthfully; a prompt that omits real relationships is wrong regardless of whether
+the omission happens to help. And every accuracy figure previously recorded for
+the SQL agent was taken with the model handicapped, so those numbers remain a
+floor.
+
+It does mean **the argument for the deterministic fast path is strengthened, not
+weakened.** The LLM path reaches 6/8 on join questions it has every hint for,
+and one of the two failures is silent. That is the case for answering the common
+question families from parameterised queries rather than from a model.
+
+### Caveats, stated because the number is small
+
+* **n = 8, single run.** Temperature is 0, but CPU inference is not perfectly
+  deterministic and one run cannot separate +1 from chance.
+* The questions are our own phrasing against the demo dataset, not real traffic.
+* Measured on Postgres only. The T-SQL path shares the prompt, so the result
+  should carry, but that was not run.
