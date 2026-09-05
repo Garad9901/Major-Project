@@ -36,7 +36,7 @@ _DRIVER_OPERATIONAL_ERRORS = tuple(_DRIVER_OPERATIONAL_ERRORS)
 
 from common.exceptions import DatabaseUnavailable
 
-from . import db, executor, guard, llm_client, schema
+from . import db, db_mssql, executor, guard, llm_client, schema
 
 logger = logging.getLogger("sql_agent")
 
@@ -68,8 +68,14 @@ def ask(question, execute=True, history_block=""):
     # one. db.connection() raises a user-safe DatabaseUnavailable when the
     # database is unreachable OR when the pool is exhausted, and always returns
     # the connection — see the sizing note in sql_agent/db.py.
+    # Which database holds the COLLEGE's records. The application's own storage
+    # (accounts, sessions, audit) is Django's default connection and is not
+    # involved here — the split is by ownership, so this dispatch is only ever
+    # about the academic records.
+    college_db = db_mssql if guard.DIALECT == "tsql" else db
+
     try:
-        with db.connection() as conn:
+        with college_db.connection() as conn:
             schema_text = schema.build_schema_text(conn)
     except _DRIVER_OPERATIONAL_ERRORS as exc:
         raise DatabaseUnavailable(f"database connection lost during schema read: {exc}") from exc

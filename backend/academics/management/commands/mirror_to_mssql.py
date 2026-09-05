@@ -140,6 +140,16 @@ class Command(DevelopmentOnlyCommand):
                 n = self._copy(mconn, mcur, physical, cols, options["rows"])
                 self.stdout.write(f"  {physical}: {len(cols)} columns, {n} rows")
 
+            # FOREIGN KEYS ARE PART OF THE SHAPE, NOT DECORATION.
+            #
+            # schema.py renders "REFERENCES other(col)" into the SQL agent's
+            # prompt from introspected constraints. A mirror without them
+            # produces a DIFFERENT PROMPT from the Postgres path, so any
+            # comparison between the two backends would be measuring my mirror
+            # rather than the port. Added after the copy so the referenced rows
+            # already exist.
+            self._mirror_foreign_keys(mcur)
+
         self.stdout.write(self.style.SUCCESS("mirror complete"))
 
     def _columns(self, table):
@@ -187,3 +197,64 @@ class Command(DevelopmentOnlyCommand):
         )
         mconn.commit()
         return len(rows)
+
+    def _mirror_foreign_keys(self, mcur):
+        """Recreate the Postgres foreign keys on the mirrored tables.
+
+        Read from pg_catalog rather than information_schema for the same reason
+        schema.py now does: constraint_column_usage is privilege-filtered and
+        shows only constraints on tables the current user owns.
+
+        Constraints whose target was not mirrored are skipped rather than
+        failing the run — the allowlist is a subset of the database, so a
+        reference out of it is expected, not an error.
+        """
+        mirrored = {schema_map.physical(t) for t in schema_map.logical_tables()}
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT src.relname, srcatt.attname, tgt.relname, tgtatt.attname
+                FROM pg_constraint c
+                JOIN pg_class src ON src.oid = c.conrelid
+                JOIN pg_class tgt ON tgt.oid = c.confrelid
+                JOIN pg_namespace n ON n.oid = src.relnamespace
+                JOIN LATERAL unnest(c.conkey)  WITH ORDINALITY AS sk(attnum, ord) ON TRUE
+                JOIN LATERAL unnest(c.confkey) WITH ORDINALITY AS tk(attnum, ord) ON tk.ord = sk.ord
+                JOIN pg_attribute srcatt ON srcatt.attrelid = c.conrelid  AND srcatt.attnum = sk.attnum
+                JOIN pg_attribute tgtatt ON tgtatt.attrelid = c.confrelid AND tgtatt.attnum = tk.attnum
+                WHERE c.contype = 'f' AND n.nspname = 'public'
+                """
+            )
+            fks = cur.fetchall()
+
+        added = skipped = 0
+        for from_t, from_c, to_t, to_c in fks:
+            if from_t not in mirrored or to_t not in mirrored:
+                skipped += 1
+                continue
+            try:
+                # A referenced column needs a unique constraint in T-SQL, which
+                # the generated tables do not carry (no primary keys are
+                # mirrored). Added here so the FK is creatable.
+                mcur.execute(
+                    f"IF NOT EXISTS (SELECT 1 FROM sys.key_constraints "
+                    f"WHERE parent_object_id = OBJECT_ID('dbo.{to_t}')) "
+                    f"ALTER TABLE dbo.[{to_t}] ALTER COLUMN [{to_c}] BIGINT NOT NULL"
+                )
+                mcur.execute(
+                    f"IF NOT EXISTS (SELECT 1 FROM sys.key_constraints "
+                    f"WHERE parent_object_id = OBJECT_ID('dbo.{to_t}')) "
+                    f"ALTER TABLE dbo.[{to_t}] ADD CONSTRAINT [PK_{to_t}] PRIMARY KEY ([{to_c}])"
+                )
+                mcur.execute(
+                    f"ALTER TABLE dbo.[{from_t}] ADD CONSTRAINT "
+                    f"[FK_{from_t}_{from_c}] FOREIGN KEY ([{from_c}]) "
+                    f"REFERENCES dbo.[{to_t}] ([{to_c}])"
+                )
+                added += 1
+            except Exception as exc:
+                skipped += 1
+                self.stdout.write(self.style.WARNING(
+                    f"  FK {from_t}.{from_c} -> {to_t}.{to_c}: {str(exc)[:90]}"
+                ))
+        self.stdout.write(f"  foreign keys: {added} added, {skipped} skipped")
