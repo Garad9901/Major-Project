@@ -34,7 +34,7 @@ import time
 from common import schema_map
 
 from . import entities
-from .intents import INTENTS
+from .intents import AVERAGE_METRICS, INTENTS, _AVERAGE_RE
 
 logger = logging.getLogger("fast_path")
 
@@ -90,6 +90,100 @@ def _find_values(question, slots, vocab):
     return values
 
 
+def _try_average(question, vocab, conn_factory):
+    """"What is the average teaching effectiveness score?" and its relatives.
+
+    Handled apart from the counting families because the rendering differs — an
+    average is not an integer, and "67.19999999" is not an answer.
+
+    The phrase -> column mapping is explicit and small (see AVERAGE_METRICS).
+    Longest phrase first, so "research publications" is not resolved by a
+    shorter overlapping key. A metric that is not listed goes to the model
+    rather than being guessed at: "research productivity score" and "research
+    publications" are different columns, and a fuzzy match between them returns
+    a plausible wrong number.
+    """
+    if not _AVERAGE_RE.search(question):
+        return None
+
+    lowered = question.lower()
+    metric = None
+    for phrase in sorted(AVERAGE_METRICS, key=len, reverse=True):
+        # WORD BOUNDARIES, not `phrase in lowered`.
+        #
+        # "age" is a substring of "average", so a plain containment test matched
+        # the age column for EVERY question containing the word "average".
+        # Longest-first ordering hid it whenever a real metric was named, and it
+        # surfaced only on an unlisted metric — caught by
+        # test_an_unlisted_metric_falls_through, which is what that test is for.
+        if re.search(rf"\b{re.escape(phrase)}\b", lowered):
+            metric = (phrase,) + AVERAGE_METRICS[phrase]
+            break
+    if metric is None:
+        return None
+    _phrase, column, noun, places = metric
+
+    # An optional department filter, so "average teaching effectiveness in
+    # Engineering" is answered about Engineering rather than the whole college —
+    # which would be a wrong answer wearing the right words.
+    department = None
+    for candidate in sorted(vocab.get(("faculty_development", "department"), []), key=len, reverse=True):
+        # Word boundary, same as _find_values. Without it "Science" matches
+        # inside "Computer Science". The longest-first ordering happens to
+        # save it here, but relying on ordering for a property a boundary
+        # states directly is how it breaks later.
+        if re.search(rf"\b{re.escape(candidate.lower())}\b", lowered):
+            department = candidate
+            break
+
+    physical_column = schema_map.physical_column("faculty_development", column)
+    table = schema_map.physical(intents_table(), qualified=True)
+
+    started = time.perf_counter()
+    try:
+        with conn_factory() as conn:
+            placeholder = _placeholder_style(conn)
+            # Column and table come from the map and from AVERAGE_METRICS, both
+            # allowlists in code. Only the department VALUE is bound.
+            sql = f"SELECT AVG(CAST({physical_column} AS FLOAT)) AS a FROM {table}"
+            params = ()
+            if department is not None:
+                sql += f" WHERE department = {placeholder}"
+                params = (department,)
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+            finally:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.warning("fast path average failed (%s) — deferring to the model", exc)
+        return None
+
+    if row is None or row[0] is None:
+        # No rows matched, so there is no average. Not renderable as 0 — a mean
+        # of nothing is not zero — so this goes to the model.
+        return None
+
+    value = round(float(row[0]), places)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    where = f" in the {department} department" if department else " across the college"
+    text = f"The average {noun}{where} is {value:,.{places}f}."
+    logger.info("fast path HIT intent=average_%s dept=%r %.1fms", column, department, elapsed_ms)
+    return FastAnswer(
+        text=text, intent=f"average_{column}", sql=sql, params=params,
+        rows=[{"a": value}], elapsed_ms=elapsed_ms,
+    )
+
+
+def intents_table():
+    """The logical table the averages are computed over."""
+    return "faculty_development"
+
+
 def _placeholder_style(conn):
     """psycopg2 wants %s, pyodbc wants ?. Asked of the driver, not assumed."""
     module = type(conn).__module__ or ""
@@ -106,6 +200,10 @@ def try_answer(question, conn_factory):
         # UNAVAILABLE, not empty. Deferring to the model is the correct
         # degradation; answering from an empty vocabulary would not be.
         return None
+
+    average = _try_average(question, vocab, conn_factory)
+    if average is not None:
+        return average
 
     matched = [i for i in INTENTS if i.pattern.search(question)]
     if not matched:

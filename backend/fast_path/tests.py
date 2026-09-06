@@ -158,7 +158,17 @@ class DeclinesWhenNotCertainTests(SimpleTestCase):
                 "Describe the faculty development profile for the Engineering department.",
                 "Which departments are strongest at digital teaching?",
                 "Compare Engineering and Medicine faculty development.",
-                "What is the average teaching effectiveness score?",
+                # NOTE: "What is the average teaching effectiveness score?" was
+                # in this list and has been REMOVED, because averages are now a
+                # supported family rather than an unsupported one.
+                #
+                # The property this test protects is unchanged: questions
+                # needing PROSE fall through. An average was never one of those
+                # — it is a single scalar with exactly one correct answer, which
+                # is precisely what this module is for. It sat here only because
+                # the first version did not implement it.
+                #
+                # Averages are asserted positively below instead.
             ):
                 with self.subTest(question=question):
                     self.assertIsNone(service.try_answer(question, _factory(conn)))
@@ -184,6 +194,60 @@ class DeclinesWhenNotCertainTests(SimpleTestCase):
                 service.try_answer(
                     "How many faculty are in the Computer Science department?",
                     _factory(conn),
+                )
+            )
+
+
+class AveragesTests(SimpleTestCase):
+    """Averages render differently from counts, and are matched more strictly.
+
+    The phrase -> column mapping is explicit and small. "research productivity
+    score" and "research publications" are DIFFERENT columns, and a fuzzy match
+    between them returns a plausible wrong number — the one outcome this module
+    exists to avoid. An unlisted metric must fall through.
+    """
+
+    def test_a_known_metric_is_answered(self):
+        conn = _FakeConn((68.2857,))
+        with mock.patch.object(entities, "vocabulary", return_value=VOCAB):
+            answer = service.try_answer(
+                "What is the average teaching effectiveness score?", _factory(conn)
+            )
+        self.assertIsNotNone(answer)
+        self.assertIn("68.3", answer.text)          # rounded, not 68.2857
+        self.assertIn("across the college", answer.text)
+
+    def test_a_department_scoped_average_binds_the_department(self):
+        # Without the filter this answers about the whole college while the
+        # question asked about one department — a wrong answer wearing the
+        # right words.
+        conn = _FakeConn((68.1,))
+        with mock.patch.object(entities, "vocabulary", return_value=VOCAB):
+            answer = service.try_answer(
+                "What is the average teaching effectiveness score in Engineering?",
+                _factory(conn),
+            )
+        self.assertIn("Engineering", answer.text)
+        self.assertEqual(conn.cursor_obj.executed[0][1], ("Engineering",))
+
+    def test_an_unlisted_metric_falls_through(self):
+        conn = _FakeConn((1.0,))
+        with mock.patch.object(entities, "vocabulary", return_value=VOCAB):
+            self.assertIsNone(
+                service.try_answer(
+                    "What is the average administrative participation score?",
+                    _factory(conn),
+                )
+            )
+
+    def test_no_rows_means_no_average_rather_than_zero(self):
+        # AVG over nothing is NULL, and a mean of nothing is not zero. Rendering
+        # 0.0 would state as fact something the records do not say.
+        conn = _FakeConn((None,))
+        with mock.patch.object(entities, "vocabulary", return_value=VOCAB):
+            self.assertIsNone(
+                service.try_answer(
+                    "What is the average teaching effectiveness score?", _factory(conn)
                 )
             )
 

@@ -670,6 +670,51 @@ Found because the failures were investigated rather than retried:
   comparisons, averages, anything needing prose — still goes to the model at
   unchanged speed. The 20-user figure holds for the families it covers, and says
   nothing about a room full of people asking for descriptions.
-* No measurement of what SHARE of real traffic the seven families capture. The
-  audit log suggests it is most of the counting questions, but that is an
-  inspection of question text, not a measured hit rate in production.
+## Coverage: what share of real traffic this actually answers
+
+Measured by replaying every question in the audit log through `try_answer`. No
+model is called, so it is cheap and repeatable.
+
+Two figures, because they answer different questions. DISTINCT coverage is
+breadth. TRAFFIC-WEIGHTED is what determines the concurrency benefit, because a
+family asked 280 times matters 280 times more to the queue than one asked once.
+
+| | distinct | traffic-weighted |
+|---|---|---|
+| seven original families | 57/195 (29.2%) | 504/886 (**56.9%**) |
+| **after adding four more** | 92/195 (47.2%) | 645/886 (**72.8%**) |
+
+886 genuine requests over 195 distinct questions. Our own load-test shapes (80
+rows) are reported separately rather than folded in, because they are synthetic
+traffic and would flatter the figure.
+
+The first measurement is what prompted the second: the top misses were
+`How many departments are there?` (19x), `How many faculty have a High
+Development Need?` (15x) and two average questions (26x combined) — all single
+scalars with one correct answer. `target` was already in the vocabulary and
+simply had no intent behind it.
+
+**What remains unanswered is now almost entirely prose**, which is correct:
+"Describe the faculty development profile", "Which departments would you
+characterise as strongest", "Summarise the digital readiness", "Compare
+Engineering and Medicine". Those need judgement and belong to the model. This is
+a reasonable place to stop adding families.
+
+Correctness of the new families verified against direct SQL, not assumed:
+8 departments, 1,291 High Development Need, 68.3 average teaching effectiveness,
+7.1 average publications, 68.1 for Engineering specifically.
+
+### A bug the coverage work exposed, caught by its own test
+
+Metric phrases were matched with `phrase in lowered`. **"age" is a substring of
+"average"**, so every question containing the word "average" matched the `age`
+column. Longest-first ordering hid it whenever a real metric was also named, and
+it surfaced only on an unlisted metric — which is exactly what
+`test_an_unlisted_metric_falls_through` exists to catch. Now matched on word
+boundaries.
+
+That is the third instance in this module of the same shape: a substring test
+standing in for a word match. The others were "Science" inside "Computer
+Science" and the department filter on averages.
+
+## What this does not cover

@@ -150,7 +150,72 @@ INTENTS = [
         template="There are {n:,} faculty in the college records.",
         zero_template="The faculty records are empty.",
     ),
+    Intent(
+        name="faculty_count_by_development_need",
+        pattern=rf"{_COUNT}\s+{_FACULTY}\b.*\b(?:development\s+need|target)\b",
+        table="faculty_development",
+        sql="SELECT COUNT(*) AS n FROM {table} WHERE target = {p}",
+        slots=[("faculty_development", "target")],
+        template="There are {n:,} faculty assessed as {v0}.",
+        zero_template="No faculty in the college records are assessed as {v0}.",
+    ),
+    Intent(
+        name="faculty_count_by_lms_usage",
+        pattern=rf"{_COUNT}\s+{_FACULTY}\b.*\blms\b|{_COUNT}\s+{_FACULTY}\b.*\blearning\s+management\b",
+        table="faculty_development",
+        sql="SELECT COUNT(*) AS n FROM {table} WHERE lms_usage_frequency = {p}",
+        slots=[("faculty_development", "lms_usage_frequency")],
+        template="There are {n:,} faculty whose LMS usage is recorded as {v0}.",
+        zero_template="No faculty in the college records have LMS usage recorded as {v0}.",
+    ),
+    Intent(
+        name="department_count",
+        # Anchored to the START so "how many faculty are in the X department"
+        # cannot reach it. That question also contains "how many" and
+        # "department", and answering it with the number of DEPARTMENTS would be
+        # a confidently wrong small number.
+        pattern=rf"^\s*{_COUNT}\s+departments?\b",
+        table="departments",
+        sql="SELECT COUNT(*) AS n FROM {table}",
+        slots=[],
+        template="The college has {n:,} departments.",
+        zero_template="No departments are recorded in the college records.",
+    ),
 ]
+
+# ---------------------------------------------------------------------------
+# AVERAGES
+#
+# Separate from the counting families because the rendering differs: a count is
+# an integer and an average is not, and "67.19999999" is not an answer anyone
+# wants. Held to one decimal place, which is the precision the underlying scores
+# are recorded at.
+#
+# The phrase -> column mapping is EXPLICIT and small. It is not inferred from
+# column names: "research productivity score" and "research publications" are
+# different columns and a fuzzy match between them returns a plausible wrong
+# number, which is the one outcome this module exists to avoid. A metric not
+# listed here goes to the model.
+# ---------------------------------------------------------------------------
+
+AVERAGE_METRICS = {
+    "research publications": ("research_publications", "research publications per faculty member", 1),
+    "teaching effectiveness": ("teaching_effectiveness_score", "teaching effectiveness score", 1),
+    "student feedback": ("student_feedback_score", "student feedback score", 1),
+    "ai tool adoption": ("ai_tool_adoption_score", "AI tool adoption score", 1),
+    "data literacy": ("data_literacy_score", "data literacy score", 1),
+    "big data readiness": ("big_data_readiness_score", "big data readiness score", 1),
+    "digital tool usage": ("digital_tool_usage_score", "digital tool usage score", 1),
+    "overall faculty development index": ("overall_faculty_development_index", "overall faculty development index", 1),
+    "collaboration index": ("collaboration_index", "collaboration index", 1),
+    "professional development": ("professional_development_score", "professional development score", 1),
+    "innovation in teaching": ("innovation_in_teaching_score", "innovation in teaching score", 1),
+    "age": ("age", "age", 1),
+}
+
+_AVERAGE_RE = re.compile(
+    r"\b(?:average|mean|avg)\b", re.IGNORECASE
+)
 
 # Ordered longest-first at match time: a question naming BOTH a department and a
 # rank must reach the two-slot intent, not the one-slot department intent that
