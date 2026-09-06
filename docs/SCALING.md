@@ -593,3 +593,83 @@ between the shapes is exactly what a single sample cannot separate from noise.
 `scripts/capacity_test.sh` ships so that a buyer can run this on their own
 hardware, which is the only place the answer is meaningful. See
 `docs/CAPACITY.md` for the method.
+
+---
+
+# The deterministic fast path — 6 September 2026
+
+Phase 3. The change the latency target actually rests on, and the first thing in
+this project to move concurrency rather than single-answer speed.
+
+## Single answers, end to end through HTTP
+
+Through TLS, Caddy, gunicorn, Django and auth — not an in-process benchmark.
+
+| question | before | after |
+|---|---|---|
+| How many faculty are in the Computer Science department? | 129,053 ms | **341 ms** |
+| How many faculty hold the rank of Professor? | 17,273 ms | **238 ms** |
+| How many faculty in Engineering have competency level Expert? | 17,649 ms | **232 ms** |
+| Describe the faculty development profile for Engineering. | 65,636 ms | 65,636 ms — still the model, correctly |
+
+## Twenty concurrent users
+
+Twenty DISTINCT accounts, already signed in, all asking different questions at
+the same instant:
+
+| | |
+|---|---|
+| answered by the fast path | **20 / 20** |
+| told "busy" | **0** |
+| throttled | 0 |
+| p50 / p95 / max | **374 ms / 468 ms / 500 ms** |
+
+Against the previous measurement on this hardware — 21 of 50 served, p50 87.2 s,
+3.3 answers/min — with `LLM_MAX_CONCURRENCY=1` unchanged. Nothing was tuned. The
+queue is empty because these questions never reach it.
+
+## Two measurement defects found on the way, both in the instrument
+
+**The fast path did not fire at all in the first end-to-end run.** It was placed
+below the `regenerate` short-circuit, and the harness used `regenerate: true` to
+avoid the cache — so the load test written to measure the fast path was the one
+shape of request that skipped it. Fixed by moving it above: "regenerate" means
+"do not serve me a STORED answer", and a deterministic lookup is recomputed
+every time.
+
+**Then 10 of 20 requests "failed".** They were `429 Throttled`. The `ask` limit
+is 10/min PER AUTHENTICATED USER, and all twenty simulated users were signing in
+as the same account — which is one person being abusive, and the throttle was
+right to refuse. Twenty real users have twenty budgets. Re-run with twenty
+distinct accounts: 0 throttled.
+
+Neither was a system defect. Both looked exactly like one. This is the third
+time on this project that the measuring instrument was wrong and the system was
+not — after `capacity_test.sh` counting every success as a failure, and the
+`Msg 3701` false positive on `DROP`.
+
+## Two real defects the concurrency run did surface
+
+Found because the failures were investigated rather than retried:
+
+* `_store_profile(..., cached=None)` violated a NOT NULL constraint. The
+  IntegrityError left the connection in an aborted transaction, which
+  `CONN_MAX_AGE=60` then handed to the NEXT request — so requests failed that
+  had nothing to do with the one that caused it.
+* the fast path put a bare string in `meta["sql"]` where `views.py` expects the
+  `_sql_meta` dict. The audit write raised, was caught, and **the answer went
+  out anyway** — every fast-path answer was served with no audit record. An
+  accountability control failing silently, which is worse than the latency it
+  was buying. Confirmed fixed by counting rows: `route='FAST'` now present.
+
+## What this does not cover
+
+* Measured on the development laptop against the demo dataset. The college's
+  hardware and data volume are different and this must be re-run there.
+* The fast path covers seven counting families. Everything else — descriptions,
+  comparisons, averages, anything needing prose — still goes to the model at
+  unchanged speed. The 20-user figure holds for the families it covers, and says
+  nothing about a room full of people asking for descriptions.
+* No measurement of what SHARE of real traffic the seven families capture. The
+  audit log suggests it is most of the counting questions, but that is an
+  inspection of question text, not a measured hit rate in production.

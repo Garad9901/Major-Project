@@ -592,13 +592,30 @@ def answer_question_stream(question, bypass_cache=False, context=None):
             "route_reason": f"deterministic lookup ({fast.intent})",
             "degraded": False,
             "cached": None,
-            "sql": fast.sql,
+            # SAME SHAPE AS _sql_meta, NOT A BARE STRING.
+            #
+            # views.py does `(meta or {}).get("sql").get("generated_sql")` to
+            # write the audit row. A string here raised
+            # "'str' object has no attribute 'get'", the audit write failed, and
+            # the ANSWER STILL WENT OUT — so every fast-path answer was served
+            # with no audit record. That is an accountability control failing
+            # silently, which is worse than the latency it was buying.
+            "sql": {
+                "generated_sql": fast.sql,
+                "error": None,
+                "row_count": len(fast.rows),
+            },
             "rag": None,
         }
         profile.mark("synthesis_first_token")
         yield "token", fast.text
         profile.log(question)
-        _store_profile(question, "FAST", profile, {}, cached=None)
+        # cached="" not None: query_profile.cached is NOT NULL. Passing None
+        # raised IntegrityError inside the request, which under concurrency left
+        # the connection in an aborted transaction that the NEXT request
+        # inherited (CONN_MAX_AGE=60 keeps connections). 10 of 20 concurrent
+        # requests failed from this, none of them the one that caused it.
+        _store_profile(question, "FAST", profile, {}, cached="")
         yield "done", {
             "answer": fast.text,
             # NOT "verification": "passed". Nothing was verified — the answer
