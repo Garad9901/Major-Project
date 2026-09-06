@@ -32,7 +32,23 @@
     "deliberately-absent tables are listed at the bottom under _excluded."
   ],
 
-  "default_schema": "public",
+  "_default_schema_doc": [
+    "The owning schema in the COLLEGE database, per SQL dialect.",
+    "",
+    "A single string was wrong: the same map serves both backends during the",
+    "migration, and 'public.faculty_development' is a syntax error on SQL",
+    "Server. Found when the fast path returned zero answers against MS SQL and",
+    "logged 'Incorrect syntax near the keyword public'. It failed CLOSED --",
+    "every question deferred to the model rather than being answered wrongly --",
+    "which is the intended degradation, but it was still broken.",
+    "",
+    "A per-table 'schema' key still overrides this when the college puts one",
+    "table somewhere unusual."
+  ],
+  "default_schema": {
+    "postgres": "public",
+    "tsql": "dbo"
+  },
 
   "tables": {
     "departments":        { "physical": "departments",        "columns": {} },

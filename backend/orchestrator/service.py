@@ -16,6 +16,9 @@ from sql_agent.service import ask as sql_ask
 from synthesis_agent.service import synthesize_answer, synthesize_answer_stream
 from web_agent.service import fetch_for_question
 
+from fast_path import service as fast_path_service
+from sql_agent import db as sql_db, db_mssql as sql_db_mssql, guard as sql_guard
+
 from . import cache, conversation, verification
 from .concurrency import llm_slot
 from .profiling import Profile
@@ -565,6 +568,55 @@ def answer_question_stream(question, bypass_cache=False, context=None):
     # now carries the context that disambiguates it.
     cache_key = context.question
 
+    # DETERMINISTIC FAST PATH — BEFORE THE SLOT *AND* BEFORE THE CACHE.
+    #
+    # Before the slot for the same reason the cache check is: with
+    # LLM_MAX_CONCURRENCY=1, anything inside llm_slot() serialises, and a
+    # question answered in 2ms would queue behind a 30-second generation.
+    #
+    # Before the CACHE because a cache lookup is not free — it embeds the
+    # question, which is a round trip to the embedding model. Measured, the
+    # whole fast path is 1.9ms median on Postgres and 5.1ms on SQL Server,
+    # which is cheaper than the lookup it skips.
+    #
+    # Returns None for anything it is not certain about, and that is most
+    # questions. See fast_path/service.py: a fast path that answers 95%
+    # correctly is worse than one that answers 60% and declines the rest,
+    # because the 5% arrive as confident wrong figures with no model and no
+    # verifier between them and the reader.
+    fast = _try_fast_path(question)
+    if fast is not None:
+        yield "meta", {
+            "question": question,
+            "route": "FAST",
+            "route_reason": f"deterministic lookup ({fast.intent})",
+            "degraded": False,
+            "cached": None,
+            "sql": fast.sql,
+            "rag": None,
+        }
+        profile.mark("synthesis_first_token")
+        yield "token", fast.text
+        profile.log(question)
+        _store_profile(question, "FAST", profile, {}, cached=None)
+        yield "done", {
+            "answer": fast.text,
+            # NOT "verification": "passed". Nothing was verified — the answer
+            # was computed by a hand-written parameterised query, so there is no
+            # model output to check. Saying "passed" would claim a check that
+            # never ran, which is the same class of untruth as the fixed refusal
+            # message containing a digit.
+            "verification": {"verification": "not_required", "reason": "deterministic lookup"},
+            "profile": profile.as_dict(),
+        }
+        return
+
+    # NOTE ON `regenerate`: the fast path runs BEFORE that check, deliberately.
+    # "Regenerate" means "do not serve me a stored answer". A deterministic
+    # lookup is not a stored answer — it is recomputed from the records on every
+    # request — so bypassing it would hand the user a slower answer to the same
+    # question with no benefit, and would have made the fast path invisible to
+    # exactly the load tests written to measure it.
     if bypass_cache:
         logger.info("cache bypassed (regenerate) for %r", question[:60])
         yield from _generate_stream(question, profile, context)
@@ -632,6 +684,21 @@ def answer_question_stream(question, bypass_cache=False, context=None):
         # success; this is the safety net that stops followers hanging.
         if leader:
             cache.finish(cache_key)
+
+
+def _try_fast_path(question):
+    """A deterministic answer, or None. Never raises.
+
+    Wrapped because the fast path is an OPTIMISATION on a working system: any
+    failure in it must cost latency, never an answer. A bug here should send the
+    question down the normal pipeline, not produce a 500.
+    """
+    try:
+        college_db = sql_db_mssql if sql_guard.DIALECT == "tsql" else sql_db
+        return fast_path_service.try_answer(question, college_db.connection)
+    except Exception:
+        logger.exception("fast path raised — falling through to the model")
+        return None
 
 
 def _generate_stream(question, profile=None, context=None):

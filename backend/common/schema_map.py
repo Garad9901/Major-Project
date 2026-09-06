@@ -65,7 +65,27 @@ def _load(path=None):
             "than treated as 'allow nothing in particular'."
         )
 
-    default_schema = raw.get("default_schema") or "public"
+    # PER-DIALECT, because the same map serves both backends during the
+    # migration and the owning schema is not the same on each: `public` on
+    # Postgres, `dbo` on SQL Server. A plain string is still accepted so a
+    # college whose map names one schema does not have to write a dict.
+    #
+    # SQL_DIALECT is read directly rather than imported from sql_agent.guard,
+    # which imports THIS module — the import would be circular. Both read the
+    # same variable, and guard refuses to start on a value outside its
+    # supported set, so an unknown dialect cannot reach here silently.
+    configured = raw.get("default_schema") or "public"
+    if isinstance(configured, dict):
+        dialect = (os.getenv("SQL_DIALECT", "").strip().lower() or "postgres")
+        default_schema = configured.get(dialect)
+        if not default_schema:
+            raise SchemaMapError(
+                f"{path}: default_schema has no entry for dialect {dialect!r} "
+                f"(has: {', '.join(sorted(configured))}). Refusing to guess a "
+                "schema name — an unqualified guess reaches a different table."
+            )
+    else:
+        default_schema = configured
     resolved = {}
     for logical, spec in tables.items():
         if logical.startswith("_"):
