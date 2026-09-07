@@ -48,12 +48,40 @@ exhausting memory*, not for parallel compute.
       container healthcheck plus restart: always, and it is a real trade-off
       rather than a free win. Introduce Redis and this becomes safe to raise.
 
-  threads = 4 (override with GUNICORN_THREADS)
-      1 x 4 = 4 requests can be in flight at once. That is deliberately larger
-      than LLM_MAX_CONCURRENCY (1): the extra threads are what allow a waiting
-      request to be HELD and then told "busy" politely, rather than being
-      refused at the socket with a connection error. Threads are cheap because
-      they are parked on I/O, not computing.
+  threads = 24 (override with GUNICORN_THREADS)
+      RAISED FROM 4. The original reasoning — extra threads let a waiting
+      request be told "busy" politely rather than refused at the socket — is
+      still right, and is why this is larger than LLM_MAX_CONCURRENCY (1).
+      What changed is that threads became the binding constraint on the
+      DETERMINISTIC path, which needs no model at all.
+
+      Arithmetic, from measured numbers:
+
+          fast path end to end       ~200 ms  (measured 177-368 ms)
+          4 threads                  4 / 0.2 = 20 requests/second
+          100 simultaneous arrivals  100 / 20 = 5.0 s to drain, p95 ~4.75 s
+
+      against a target of p95 under 1 second. Draining 100 requests inside a
+      second at 200 ms each needs ~20-24 threads, so 24.
+
+      This is sound only because the fast path is I/O-BOUND — one indexed
+      aggregate and a socket write — so the threads park rather than compete for
+      the GIL. It would not be sound for CPU-bound work.
+
+      RAISING THIS ALONE MOVES THE BOTTLENECK RATHER THAN REMOVING IT, which is
+      why three things moved together in one commit:
+        * threads                        4  -> 24  (here)
+        * RAG_AGENT_RO_POOL_MAX          8  -> 24  (sql_agent/db.py)
+        * rag_agent_ro CONNECTION LIMIT  10 -> 32  (db/sql/create_rag_agent_ro.sql)
+
+      The third is not optional. docs/SCALING.md records an outage caused by
+      CONN_MAX_AGE=60 holding one persistent connection per thread until
+      Postgres refused with "too many clients already". 24 threads against a
+      role limit of 10 reproduces that incident exactly.
+
+      Budget check on the reference machine: max_connections=100, of which
+      ~24 Django (app user, CONN_MAX_AGE=60) + up to 24 rag_agent_ro + 1 sync
+      worker + operator headroom. Measured 7 in use before the change.
 
 TIMEOUTS
 --------
@@ -70,7 +98,7 @@ bind = os.getenv("GUNICORN_BIND", "0.0.0.0:8000")
 
 # --- worker model ------------------------------------------------------------
 workers = int(os.getenv("GUNICORN_WORKERS", "1"))
-threads = int(os.getenv("GUNICORN_THREADS", "4"))
+threads = int(os.getenv("GUNICORN_THREADS", "24"))
 worker_class = "gthread"
 
 # --- timeouts ----------------------------------------------------------------

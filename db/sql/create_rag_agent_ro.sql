@@ -55,7 +55,19 @@ ALTER ROLE rag_agent_ro
     NOCREATEDB
     NOCREATEROLE
     NOREPLICATION
-    CONNECTION LIMIT 10;
+    -- RAISED FROM 10 TO 32, together with GUNICORN_THREADS (4 -> 24) and
+    -- RAG_AGENT_RO_POOL_MAX (8 -> 24). Raising any one alone only moves where
+    -- the failure happens.
+    --
+    -- Budget: 24 for the backend's connection pool, 1 held continuously by the
+    -- sync worker, and headroom for an operator running check_rag_agent_ro
+    -- while the system is busy.
+    --
+    -- Still a HARD CEILING rather than unlimited, deliberately. It is what
+    -- turns runaway connection use into a clear refusal naming this role,
+    -- instead of exhausting the server's global max_connections and taking
+    -- down every other client with it.
+    CONNECTION LIMIT 32;
 
 -- Session-level default is a separate ALTER ROLE ... SET statement in Postgres
 -- (can't be combined with the role-attribute clauses above).

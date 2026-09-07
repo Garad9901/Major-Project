@@ -70,6 +70,47 @@ QUEUE_TIMEOUT_SECONDS = float(os.getenv("LLM_QUEUE_TIMEOUT", "25"))
 
 _slots = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
+# ==============================================================================
+# ADMISSION BOUND — why a queue timeout alone starves the deterministic path
+# ==============================================================================
+# gunicorn runs `gthread`: a request holds one worker THREAD for its whole life,
+# and _slots.acquire(timeout=...) below BLOCKS while holding it. So a request
+# waiting for the model is not merely waiting — it is occupying a thread that
+# nothing else can use.
+#
+# With the shipped 4 threads, four model questions consumed every one, and a
+# fast-path question that needs no model at all could not be served. Measured
+# before this bound existed:
+#
+#     fast path, idle system            177 / 189 / 367 ms
+#     fast path, 4 model requests live       17,173 ms      <- 47-97x
+#
+# 8s into the saturation + 17.2s waiting = 25.2s, which is exactly when three
+# model requests hit the 25s queue timeout and returned their threads. THE FAST
+# PATH WAS NOT WAITING FOR GENERATION. It was waiting for the queue timeout to
+# expire, which means starvation scales with LLM_QUEUE_TIMEOUT rather than with
+# how fast the model is.
+#
+# That inverts the recommendation in docs/SCALING.md to raise the timeout to
+# 120: doing so without this bound would take starvation from 17s to 120s.
+#
+# THE FIX: cap how many threads model requests may occupy, and refuse the rest
+# IMMEDIATELY rather than blocking. A refused request releases its thread in
+# milliseconds, so threads beyond this bound are always available to the
+# deterministic path no matter how deep the model queue is.
+#
+# Immediate refusal is also more honest than a slow one. A request that waits
+# 25s to be told "busy" has consumed a thread for 25s to deliver no answer; the
+# user would rather know at once, and the server would rather have the thread.
+#
+# SIZING: derived from GUNICORN_THREADS so the two cannot drift. Roughly a third
+# of the pool may block on the model, leaving the rest for the fast path, the
+# cache and health checks. With MAX_CONCURRENCY=1 only one of the admitted
+# requests is generating anyway; the others are its queue.
+_WORKER_THREADS = int(os.getenv("GUNICORN_THREADS", "4"))
+MAX_ADMITTED = int(os.getenv("LLM_MAX_ADMITTED", str(max(1, _WORKER_THREADS // 3))))
+_admission = threading.BoundedSemaphore(MAX_ADMITTED)
+
 # Observability only — never used for control decisions, so a torn read is
 # harmless. Reported in logs so an operator can see queueing before users complain.
 _waiting = 0
@@ -108,13 +149,33 @@ def llm_slot(label=""):
             "llm queue: %d waiting for %d slot(s) %s", depth, MAX_CONCURRENCY, label
         )
 
+    # ADMISSION FIRST, AND WITHOUT BLOCKING.
+    #
+    # Held for the whole request, because it is the THREAD this protects, and
+    # the thread is held until the response finishes streaming. Refusing here
+    # costs microseconds and returns the thread immediately.
+    if not _admission.acquire(blocking=False):
+        with _waiting_lock:
+            _waiting -= 1
+        logger.info(
+            "llm admission refused (%d already admitted, %d worker threads) %s",
+            MAX_ADMITTED, _WORKER_THREADS, label,
+        )
+        raise AssistantBusy(
+            f"the assistant is already handling {MAX_ADMITTED} questions"
+        )
+
     try:
         acquired = _slots.acquire(timeout=QUEUE_TIMEOUT_SECONDS)
+    except BaseException:
+        _admission.release()
+        raise
     finally:
         with _waiting_lock:
             _waiting -= 1
 
     if not acquired:
+        _admission.release()
         logger.warning(
             "llm queue timeout after %.0fs (max_concurrency=%d) %s",
             QUEUE_TIMEOUT_SECONDS, MAX_CONCURRENCY, label,
@@ -127,3 +188,4 @@ def llm_slot(label=""):
         yield
     finally:
         _slots.release()
+        _admission.release()

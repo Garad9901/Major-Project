@@ -718,3 +718,93 @@ standing in for a word match. The others were "Science" inside "Computer
 Science" and the department filter on averages.
 
 ## What this does not cover
+
+---
+
+# Phase 1 — the fast path can no longer be starved by the model — 7 September 2026
+
+The defect, the fix, and the two measurements that prove it.
+
+## The defect
+
+`gunicorn` runs `gthread`: a request holds one worker THREAD for its whole life,
+and `llm_slot`'s `_slots.acquire(timeout=...)` blocks while holding it. With the
+shipped 4 threads, four model questions consumed every one.
+
+| | latency | route |
+|---|---|---|
+| fast path, idle | 177 / 189 / 367 ms | FAST |
+| **fast path, 4 model requests in flight** | **17,173 ms** | FAST |
+
+**The fast path was not waiting for generation.** 8 s of saturation + 17.2 s of
+waiting = 25.2 s — exactly when three model requests hit `llm queue timeout
+after 25s` and returned their threads. So starvation scaled with
+`LLM_QUEUE_TIMEOUT`, not with model speed, and this document's own earlier
+recommendation to raise that timeout to 120 would have made it **five times
+worse**. Both findings were correct; each was measured alone.
+
+## The fix, in two parts that had to move together
+
+**1. An admission bound.** At most `LLM_MAX_ADMITTED` requests may be inside
+`llm_slot`; the rest are refused *immediately*, releasing the thread in
+microseconds rather than holding it for the queue timeout. Derived from
+`GUNICORN_THREADS` so the two cannot drift, and always strictly smaller — the
+margin IS the fix. Immediate refusal is also the more honest answer: waiting 25 s
+to be told "busy" spends a thread to deliver nothing.
+
+**2. Sizing, as one change.** Raising threads alone moves the bottleneck:
+
+| | was | now | why |
+|---|---|---|---|
+| `GUNICORN_THREADS` | 4 | 24 | 100 arrivals / (4 threads ÷ 200 ms) = 5.0 s to drain |
+| `RAG_AGENT_RO_POOL_MAX` | 8 | 24 | 16 of 24 threads would get `DatabaseUnavailable` and fall through to the model |
+| `rag_agent_ro CONNECTION LIMIT` | 10 | 32 | 24 threads against a limit of 10 reproduces the `CONN_MAX_AGE=60` outage recorded above |
+
+Sound only because the fast path is **I/O-bound** — one indexed aggregate and a
+socket write — so threads park rather than compete for the GIL.
+
+## Proof 1 — starvation is gone
+
+Same experiment, unchanged:
+
+| | before | after |
+|---|---|---|
+| fast path, idle | 177 / 189 / 367 ms | 250 / 177 / 163 ms |
+| **fast path, 4 model requests live** | **17,173 ms** | **249 / 183 / 200 ms** |
+
+Under saturation the fast path is now **indistinguishable from idle**.
+
+The model questions themselves are unchanged — one served at 46 s, three refused
+at 25 s. That is `LLM_MAX_CONCURRENCY=1` and the queue timeout behaving as
+designed, and it is now *someone else's* problem rather than everyone's.
+
+## Proof 2 — 100 concurrent users
+
+100 distinct accounts, already signed in, all asking different questions at once:
+
+| | |
+|---|---|
+| answered by the fast path | **100 / 100** |
+| told busy / throttled / failed | **0 / 0 / 0** |
+| p50 / p95 / max | **430 ms / 553 ms / 684 ms** |
+
+Against a target of **p95 under 1 second**. The Phase 0 arithmetic predicted
+~4.75 s at 4 threads and that 20–24 would be needed; 24 threads delivered 553 ms.
+
+Checked rather than assumed: **zero** pool-exhaustion or "too many clients"
+errors in the log, peak `rag_agent_ro` connections well inside the new limit, and
+**106 `route=FAST` audit rows** written for the run — the fast path is audited,
+which is the control that failed silently in Phase 3.
+
+## What this does not show
+
+* The model path is **not** improved. Three of four concurrent model questions
+  are still refused at 25 s. Phase 1 protects the deterministic path from the
+  model path; it does not make the model path faster or more available. That is
+  what pre-computation (Phase 4) is for.
+* Measured on the development laptop against the demo dataset, with all 100
+  users asking fast-path questions. A realistic mix including prose questions
+  will look different, and that measurement belongs in Phase 7.
+* `LLM_MAX_ADMITTED` defaults to `GUNICORN_THREADS // 3` = 8. That ratio is a
+  judgement, not a measurement — it was not tuned, and no evidence yet says 8 is
+  better than 6 or 12.

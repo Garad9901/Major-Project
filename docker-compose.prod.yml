@@ -143,7 +143,7 @@ services:
       # double both limits. See backend/gunicorn.conf.py and
       # orchestrator/concurrency.py.
       GUNICORN_WORKERS: ${GUNICORN_WORKERS:-1}
-      GUNICORN_THREADS: ${GUNICORN_THREADS:-4}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-24}
       GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-300}
       # LLM admission control. 1 = the honest default for CPU inference; raise
       # only with a GPU, and measure. See orchestrator/concurrency.py.

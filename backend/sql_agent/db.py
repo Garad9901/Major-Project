@@ -57,7 +57,17 @@ CONNECT_TIMEOUT_S = int(os.getenv("RAG_AGENT_RO_CONNECT_TIMEOUT", "5"))
 # running check_rag_agent_ro. If you raise this, raise the role's CONNECTION
 # LIMIT first or you have simply moved where the error happens.
 POOL_MIN = int(os.getenv("RAG_AGENT_RO_POOL_MIN", "1"))
-POOL_MAX = int(os.getenv("RAG_AGENT_RO_POOL_MAX", "8"))
+# RAISED FROM 8 WITH THE THREAD COUNT, not independently.
+#
+# The fast path borrows one pooled connection per request. With 24 worker
+# threads a pool of 8 means 16 concurrent fast-path questions get
+# DatabaseUnavailable and fall through to the model — turning a 200 ms answer
+# into a 60 s one, or a refusal, under exactly the load this is meant to serve.
+#
+# Sized to the thread count so the pool can never be the thing that runs out
+# first. The role's CONNECTION LIMIT was raised to 32 in the same commit to
+# cover this pool plus the sync worker plus operator headroom.
+POOL_MAX = int(os.getenv("RAG_AGENT_RO_POOL_MAX", "24"))
 
 _pool = None
 _pool_lock = threading.Lock()
