@@ -15,7 +15,10 @@ class AuditLog(models.Model):
     client_ip = models.GenericIPAddressField(null=True, blank=True)
 
     question = models.TextField()  # already sanitized before storage
-    route = models.CharField(max_length=10, blank=True)  # SQL / RAG / BOTH
+    # 16, not 10: 'PRECOMPUTED' is 11 characters, and a route that does not
+    # fit the column fails the audit write - which is caught and logged, so
+    # the answer goes out unaudited. Same silent failure as Phase 3's.
+    route = models.CharField(max_length=16, blank=True)  # SQL / RAG / BOTH
     agents_used = models.CharField(max_length=20, blank=True)
     generated_sql = models.TextField(null=True, blank=True)
     final_answer = models.TextField(blank=True)

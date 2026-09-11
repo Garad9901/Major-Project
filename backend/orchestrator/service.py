@@ -19,7 +19,7 @@ from web_agent.service import fetch_for_question
 from fast_path import service as fast_path_service
 from sql_agent import db as sql_db, db_mssql as sql_db_mssql, guard as sql_guard
 
-from . import cache, concurrency, conversation, verification
+from . import cache, concurrency, conversation, precompute, verification
 from .concurrency import llm_slot
 from .profiling import Profile
 
@@ -628,6 +628,52 @@ def answer_question_stream(question, bypass_cache=False, context=None):
         }
         return
 
+    # PRE-COMPUTED PROSE - after the fast path, before the cache.
+    #
+    # After the fast path because a count is cheaper than a lookup and never
+    # stale. Before the cache because a stored answer here was VERIFIED before
+    # it was stored and is deleted the instant its source rows change, whereas
+    # the cache is semantic and time-bounded; when both could answer, the one
+    # with the stronger guarantee should.
+    #
+    # Also before `regenerate`, for the same reason as the fast path: this is
+    # not a stored copy of a previous conversation's answer, it is the current
+    # verified answer for this question, regenerated whenever the data moves.
+    #
+    # A distinct route, not folded into "cached": these have to be measured
+    # separately to know whether pre-computation is earning its keep.
+    pre = _try_precomputed(question)
+    if pre is not None:
+        yield "meta", {
+            "question": question,
+            "route": "PRECOMPUTED",
+            "route_reason": f"pre-computed and verified ({pre.shape})",
+            "degraded": False,
+            "cached": None,
+            # Provenance exactly as the live answer carried it, so the UI shows
+            # sources for a pre-computed answer the same way.
+            "sql": (pre.sources or {}).get("sql"),
+            "rag": (pre.sources or {}).get("rag"),
+            "web": (pre.sources or {}).get("web"),
+            "precomputed": {
+                "generated_at": pre.generated_at.isoformat(),
+                "data_version": pre.data_version,
+                "generation_ms": pre.generation_ms,
+            },
+        }
+        profile.mark("synthesis_first_token")
+        yield "token", pre.answer
+        profile.log(question)
+        _store_profile(question, "PRECOMPUTED", profile, pre.verification or {}, cached="")
+        yield "done", {
+            "answer": pre.answer,
+            # The verification that RAN when this was generated, not a claim
+            # made now. It is what qualified the answer for storage.
+            "verification": dict(pre.verification or {}, precomputed=True),
+            "profile": profile.as_dict(),
+        }
+        return
+
     # NOTE ON `regenerate`: the fast path runs BEFORE that check, deliberately.
     # "Regenerate" means "do not serve me a stored answer". A deterministic
     # lookup is not a stored answer — it is recomputed from the records on every
@@ -701,6 +747,24 @@ def answer_question_stream(question, bypass_cache=False, context=None):
         # success; this is the safety net that stops followers hanging.
         if leader:
             cache.finish(cache_key)
+
+
+def _try_precomputed(question):
+    """A stored, verified answer, or None. Never raises - an optimisation on a
+    working system must cost latency, never an answer."""
+    try:
+        college_db = sql_db_mssql if sql_guard.DIALECT == "tsql" else sql_db
+        found = precompute.lookup(question, college_db.connection)
+        if found is not None:
+            # Observability only; a failed increment must not lose the answer.
+            try:
+                type(found).objects.filter(pk=found.pk).update(served_count=found.served_count + 1)
+            except Exception:
+                pass
+        return found
+    except Exception:
+        logger.exception("precomputed lookup raised - falling through")
+        return None
 
 
 def _try_fast_path(question):

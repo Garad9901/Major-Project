@@ -138,6 +138,21 @@ def bump_generation(reason=""):
     return token
 
 
+def current_generation():
+    """The shared generation token, or None if Redis cannot be read.
+
+    For the pre-computation refresher, which watches this to learn that the
+    records changed. None means "unknown", and the caller treats unknown as
+    "do not assume anything moved" - the fingerprints are the ground truth for
+    pre-computed answers; this token is only the cheap trigger for checking
+    them.
+    """
+    try:
+        return _shared().get(_GENERATION_KEY)
+    except Exception:
+        return None
+
+
 def _check_generation():
     """Drop everything if another process bumped the token.
 

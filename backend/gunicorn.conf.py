@@ -152,3 +152,18 @@ access_log_format = '%(h)s "%(r)s" %(s)s %(b)s %(L)ss "%(a)s"'
 # Trust the X-Forwarded-* headers from Caddy only. Django additionally verifies
 # the protocol via SECURE_PROXY_SSL_HEADER.
 forwarded_allow_ips = os.getenv("GUNICORN_FORWARDED_ALLOW_IPS", "*")
+
+
+# --- background work ---------------------------------------------------------
+# The pre-computation refresher runs inside the worker rather than as a separate
+# container because it must share the process-local LLM semaphore: it only
+# generates when concurrency.queue_position() == 1, i.e. when no person is
+# waiting, and that fact lives in this process. A separate container would
+# either compete blindly for the model or need Redis-coordinated admission,
+# which is the same change GUNICORN_WORKERS > 1 would need (see above).
+def post_worker_init(worker):
+    try:
+        from orchestrator import precompute_refresher
+        precompute_refresher.start()
+    except Exception:  # never let background work stop the worker booting
+        worker.log.exception("precompute refresher failed to start")

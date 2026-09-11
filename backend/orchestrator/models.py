@@ -65,7 +65,10 @@ class Message(models.Model):
     text = models.TextField()
     # Which agent path answered. Rendered as a small badge in the UI, and null
     # for user messages.
-    route = models.CharField(max_length=10, blank=True)
+    # 16, not 10: 'PRECOMPUTED' is 11 characters, and a route that does not
+    # fit the column fails the audit write - which is caught and logged, so
+    # the answer goes out unaudited. Same silent failure as Phase 3's.
+    route = models.CharField(max_length=16, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -109,7 +112,10 @@ class QueryProfile(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     question = models.TextField()
-    route = models.CharField(max_length=10, blank=True)
+    # 16, not 10: 'PRECOMPUTED' is 11 characters, and a route that does not
+    # fit the column fails the audit write - which is caught and logged, so
+    # the answer goes out unaudited. Same silent failure as Phase 3's.
+    route = models.CharField(max_length=16, blank=True)
 
     # Wall time inside the pipeline generator, i.e. what profiling.Profile
     # measured. NOT the same as AuditLog.latency_ms, which is measured in the
@@ -153,3 +159,40 @@ class QueryProfile(models.Model):
 
     def __str__(self):
         return f"[{self.route}] {self.total_ms:.0f}ms {self.question[:40]}"
+
+
+class PrecomputedAnswer(models.Model):
+    """A verified prose answer generated in the background and served as a
+    lookup. See orchestrator/precompute.py for what is stored, why, and the
+    conditions under which a row is deleted rather than served.
+
+    One row per (shape, entity_key). entity_key is the pipe-joined entity
+    values, or blank for a global shape. data_version is the fingerprint of the
+    source rows at generation time; the refresher deletes the row the moment
+    the live fingerprint differs, so nothing here is ever served stale.
+    """
+
+    shape = models.CharField(max_length=64)
+    entity_key = models.CharField(max_length=200, blank=True)
+    canonical_question = models.TextField()
+    answer = models.TextField()
+    # 16, not 10: 'PRECOMPUTED' is 11 characters, and a route that does not
+    # fit the column fails the audit write - which is caught and logged, so
+    # the answer goes out unaudited. Same silent failure as Phase 3's.
+    route = models.CharField(max_length=16, blank=True)
+    # Provenance, exactly as a live answer's meta would carry it, so the UI can
+    # show sources for a pre-computed answer the same way.
+    sources = models.JSONField(default=dict, blank=True)
+    verification = models.JSONField(default=dict, blank=True)
+    data_version = models.CharField(max_length=64, blank=True)
+    generation_ms = models.IntegerField(default=0)
+    generated_at = models.DateTimeField()
+    served_count = models.IntegerField(default=0)
+
+    class Meta:
+        db_table = "precomputed_answer"
+        unique_together = [("shape", "entity_key")]
+        indexes = [models.Index(fields=["shape", "entity_key"])]
+
+    def __str__(self):
+        return f"{self.shape}[{self.entity_key}] v{self.data_version[:8]}"
