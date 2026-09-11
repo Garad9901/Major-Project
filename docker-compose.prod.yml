@@ -148,7 +148,7 @@ services:
       # LLM admission control. 1 = the honest default for CPU inference; raise
       # only with a GPU, and measure. See orchestrator/concurrency.py.
       LLM_MAX_CONCURRENCY: ${LLM_MAX_CONCURRENCY:-1}
-      LLM_QUEUE_TIMEOUT: ${LLM_QUEUE_TIMEOUT:-25}
+      LLM_QUEUE_TIMEOUT: ${LLM_QUEUE_TIMEOUT:-120}
       # Inline answer verification. ON by default. MEASURED COST: roughly
       # doubles response time (+98% warm), which also roughly halves throughput
       # because inference serialises. See orchestrator/verification.py.

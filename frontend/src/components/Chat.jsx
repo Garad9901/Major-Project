@@ -1,3 +1,23 @@
+
+// "2nd", "3rd", "11th" - for the queue-position notice.
+function ordinal(n) {
+  const v = n % 100;
+  if (v >= 11 && v <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1: return `${n}st`;
+    case 2: return `${n}nd`;
+    case 3: return `${n}rd`;
+    default: return `${n}th`;
+  }
+}
+
+// Seconds as a person would say them. Under a minute stays in seconds because
+// "about 1 minute" for 40 s reads as longer than it is.
+function humanSeconds(s) {
+  if (s < 60) return `${Math.max(5, Math.round(s / 5) * 5)} seconds`;
+  const m = Math.round(s / 60);
+  return m === 1 ? "a minute" : `${m} minutes`;
+}
 // Copyright (c) 2026 Yash Garad. All rights reserved.
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -282,7 +302,14 @@ function Chat({ username, initialTheme, onOpenAdmin, onLogout, onSessionExpired 
         onStage: (s) =>
           update(() => ({
             stage:
-              s.stage === "routing_done"
+              // Queue position, sent before a model request starts waiting.
+              // A long wait with a number attached is information; the same
+              // wait against a spinner is a hang. See orchestrator/service.py.
+              s.stage === "queued"
+                ? `You're ${ordinal(s.position)} in line — about ${humanSeconds(
+                    s.estimated_wait_seconds,
+                  )}`
+                : s.stage === "routing_done"
                 ? s.route === "SQL"
                   ? "Querying the database…"
                   : s.route === "RAG"

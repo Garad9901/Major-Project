@@ -50,23 +50,29 @@ MAX_CONCURRENCY = int(os.getenv("LLM_MAX_CONCURRENCY", "1"))
 
 # How long a request waits for a slot before being told the assistant is busy.
 #
-# The intent is: long enough to absorb the tail of one in-flight answer, short
-# enough that a refusal arrives while the user is still paying attention.
+# 120, RAISED FROM 25 - and safe to raise only now, for two reasons that both
+# had to land first.
 #
-# 25 DOES NOT MEET THAT INTENT, and is kept only because what should replace it
-# is a product decision about how long a student will wait, not an engineering
-# one. This comment previously justified 25 as covering "one full answer ahead"
-# on the basis of 19-22s warm answers. The measured end-to-end p50 over 163 real
-# questions is 28.2s (docs/LATENCY.md), so the second person in the queue is
-# refused BEFORE the answer ahead of them reaches its median completion.
+# 1. The wait is VISIBLE. _generate_stream sends a "queued" stage with the
+#    exact position and an estimate before entering the slot. A 120-second wait
+#    against a blank screen is a hang; against "2nd in line, about 90 seconds"
+#    it is information, and the person can choose to give up. 25 was held for
+#    as long as the wait was invisible - the comment here used to say the
+#    replacement was a product decision about how long a student will wait,
+#    and it stopped being a hard one once the student can see where they are.
 #
-# A 50-user load test recommended 120 (docs/SCALING.md), but measured only the
-# coalescing-friendly shape -- 50 users over 5 shared questions, ~5 real
-# generations. That does not establish 120 for a room asking different things.
+# 2. Starvation no longer scales with this value. Before the admission bound,
+#    a waiting request held a worker thread, so raising this from 25 to 120
+#    would have taken fast-path starvation from 17 s to 120 s (docs/SCALING.md,
+#    Phase 1). With the bound, threads beyond MAX_ADMITTED are never held by
+#    waiters, and the deterministic path is unaffected by this number.
 #
-# Operators should raise this. See docs/CAPACITY.md for how to measure it on
-# your own hardware, which is the only place the number means anything.
-QUEUE_TIMEOUT_SECONDS = float(os.getenv("LLM_QUEUE_TIMEOUT", "25"))
+# Why 120 and not more: the measured model-path p50 is ~37-79 s by route
+# (query_profile). 120 covers positions 1-3 at the SQL p50 and position 2 at
+# the RAG p50; beyond that a wait exceeds what the estimate can make
+# reasonable. docs/SCALING.md's 50-user test measured 120 as the value at which
+# refusals stopped, on the coalescing-friendly shape.
+QUEUE_TIMEOUT_SECONDS = float(os.getenv("LLM_QUEUE_TIMEOUT", "120"))
 
 _slots = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
@@ -103,13 +109,132 @@ _slots = threading.BoundedSemaphore(MAX_CONCURRENCY)
 # 25s to be told "busy" has consumed a thread for 25s to deliver no answer; the
 # user would rather know at once, and the server would rather have the thread.
 #
-# SIZING: derived from GUNICORN_THREADS so the two cannot drift. Roughly a third
-# of the pool may block on the model, leaving the rest for the fast path, the
-# cache and health checks. With MAX_CONCURRENCY=1 only one of the admitted
-# requests is generating anyway; the others are its queue.
+# SIZING - derived from what admission actually governs, which is NOT the
+# thread count.
+#
+# The first version used GUNICORN_THREADS // 3 = 8. That is the wrong quantity.
+# Thread count bounds how many requests can be HELD; it says nothing about how
+# many can be SERVED. With MAX_CONCURRENCY=1 the queue is strictly serial, so a
+# request at position k waits roughly (k-1) x p50 seconds:
+#
+#     position 1   waits  0 s    -> served
+#     position 2   waits  ~p50   -> refused if p50 > LLM_QUEUE_TIMEOUT
+#
+# So admitting 8 against a 25 s timeout and a ~40 s p50 means 7 people each
+# hold a thread for 25 s and are refused anyway. They were never servable.
+# That is the exact cost this bound exists to remove, just smaller - and
+# invisible, because the refusal message reads the same either way.
+#
+# Derivation:
+#
+#     MAX_ADMITTED = ceil(LLM_QUEUE_TIMEOUT / p50_answer_seconds) + 1
+#
+# i.e. everyone who could plausibly be reached before the timeout, plus one so
+# the queue never sits empty while an answer is finishing. 25 s / ~40 s -> 2.
+# 120 s / ~40 s -> 4. GUNICORN_THREADS remains a strict CEILING (the margin is
+# what keeps the fast path unblockable) but is no longer the derivation.
+#
+# p50 COMES FROM MEASUREMENT, NOT A CONSTANT. It is read from query_profile -
+# the model-path answers this deployment has actually produced - with a
+# fallback only when no measurement exists yet. Pre-computation will move it,
+# so it is recomputed via recompute_admission() rather than fixed at import.
 _WORKER_THREADS = int(os.getenv("GUNICORN_THREADS", "4"))
-MAX_ADMITTED = int(os.getenv("LLM_MAX_ADMITTED", str(max(1, _WORKER_THREADS // 3))))
-_admission = threading.BoundedSemaphore(MAX_ADMITTED)
+
+# Used only when query_profile has no model-path rows yet (a fresh install).
+# 87 is the p50 recorded in docs/PRODUCT_PLAN.md for the reference hardware.
+_FALLBACK_P50_SECONDS = float(os.getenv("LLM_P50_SECONDS", "87"))
+
+# How many recent model-path answers the p50 is taken over. Enough to be
+# stable, few enough to follow a real change within a day of normal use.
+_P50_SAMPLE = 200
+
+
+def measured_model_p50_seconds():
+    """p50 of recent model-path answers, or None if it cannot be measured.
+
+    Model-path means anything the model produced: FAST and PRECOMPUTED are
+    excluded because they do not occupy the slot this bound governs, and cached
+    answers are excluded because they did not occupy it either.
+
+    Returns None rather than a default on any failure, so the caller can say
+    which it used. A number that quietly came from a constant would defeat the
+    point of measuring.
+    """
+    try:
+        from .models import QueryProfile  # local: this module loads before apps
+
+        rows = list(
+            QueryProfile.objects.filter(cached="")
+            .exclude(route__in=("FAST", "PRECOMPUTED", ""))
+            .order_by("-id")
+            .values_list("total_ms", flat=True)[:_P50_SAMPLE]
+        )
+    except Exception:  # database not up yet, table absent, etc.
+        return None
+    rows = sorted(v for v in rows if v is not None)
+    if len(rows) < 5:  # too few to call it a median
+        return None
+    return rows[len(rows) // 2] / 1000.0
+
+
+def derive_max_admitted(queue_timeout_s, p50_s, worker_threads):
+    """ceil(timeout / p50) + 1, capped strictly below the thread count."""
+    import math
+
+    p50_s = max(float(p50_s), 0.001)
+    derived = math.ceil(queue_timeout_s / p50_s) + 1
+    ceiling = max(1, worker_threads - 1)
+    return max(1, min(derived, ceiling))
+
+
+# RLock, NOT Lock. _get_admission() holds this while calling
+# recompute_admission(), which takes it again. With a plain Lock that is a
+# deadlock on the FIRST llm_slot() of the process - i.e. the first model
+# request after every deploy. The unit tests missed it because they call
+# recompute_admission() directly; the full suite caught it by hanging for ten
+# minutes at the first orchestrator test that entered the slot.
+_admission_lock = threading.RLock()
+_admission = None          # created lazily: needs the database for p50
+MAX_ADMITTED = None
+ADMISSION_SOURCE = None    # "measured" | "fallback" | "override", for stats()
+
+
+def recompute_admission():
+    """(Re)size the admission bound from the current measured p50.
+
+    Safe to call while requests are in flight: each request captured the
+    semaphore it acquired and releases THAT one, so swapping the module-level
+    reference cannot double-release or strand a ticket.
+    """
+    global _admission, MAX_ADMITTED, ADMISSION_SOURCE
+    override = os.getenv("LLM_MAX_ADMITTED", "").strip()
+    if override:
+        value, source, p50 = int(override), "override", None
+    else:
+        p50 = measured_model_p50_seconds()
+        if p50 is None:
+            p50, source = _FALLBACK_P50_SECONDS, "fallback"
+        else:
+            source = "measured"
+        value = derive_max_admitted(QUEUE_TIMEOUT_SECONDS, p50, _WORKER_THREADS)
+    with _admission_lock:
+        _admission = threading.BoundedSemaphore(value)
+        MAX_ADMITTED = value
+        ADMISSION_SOURCE = source
+    logger.info(
+        "llm admission bound = %d (%s; p50=%s s, timeout=%.0f s, threads=%d)",
+        value, source, ("%.1f" % p50) if p50 is not None else "n/a",
+        QUEUE_TIMEOUT_SECONDS, _WORKER_THREADS,
+    )
+    return value
+
+
+def _get_admission():
+    if _admission is None:
+        with _admission_lock:
+            if _admission is None:
+                recompute_admission()
+    return _admission
 
 # Observability only — never used for control decisions, so a torn read is
 # harmless. Reported in logs so an operator can see queueing before users complain.
@@ -123,7 +248,28 @@ def stats():
         "max_concurrency": MAX_CONCURRENCY,
         "waiting": _waiting,
         "queue_timeout_seconds": QUEUE_TIMEOUT_SECONDS,
+        "max_admitted": MAX_ADMITTED,
+        "admission_source": ADMISSION_SOURCE,
     }
+
+
+def queue_position():
+    """1-based position a request entering now would take. 1 means 'next'.
+
+    Counts BOTH the requests waiting for a slot and the ones currently holding
+    one. _waiting alone is not enough: it is decremented the moment a request
+    acquires the slot, so with one answer generating and nobody queued it reads
+    0 - and a newcomer is 2nd in line, not 1st. Caught by test_position_counts_
+    everyone_ahead.
+
+    _slots._value is the number of FREE slots; MAX_CONCURRENCY minus that is how
+    many are held. Reading a semaphore's counter is an observability read, the
+    same class as _waiting - never used for a control decision.
+
+    The web layer shows this so a long wait is information, not a blank screen.
+    """
+    holding = MAX_CONCURRENCY - _slots._value
+    return _waiting + holding + 1
 
 
 @contextlib.contextmanager
@@ -154,7 +300,8 @@ def llm_slot(label=""):
     # Held for the whole request, because it is the THREAD this protects, and
     # the thread is held until the response finishes streaming. Refusing here
     # costs microseconds and returns the thread immediately.
-    if not _admission.acquire(blocking=False):
+    admission = _get_admission()
+    if not admission.acquire(blocking=False):
         with _waiting_lock:
             _waiting -= 1
         logger.info(
@@ -168,14 +315,14 @@ def llm_slot(label=""):
     try:
         acquired = _slots.acquire(timeout=QUEUE_TIMEOUT_SECONDS)
     except BaseException:
-        _admission.release()
+        admission.release()
         raise
     finally:
         with _waiting_lock:
             _waiting -= 1
 
     if not acquired:
-        _admission.release()
+        admission.release()
         logger.warning(
             "llm queue timeout after %.0fs (max_concurrency=%d) %s",
             QUEUE_TIMEOUT_SECONDS, MAX_CONCURRENCY, label,
@@ -188,4 +335,4 @@ def llm_slot(label=""):
         yield
     finally:
         _slots.release()
-        _admission.release()
+        admission.release()

@@ -54,6 +54,11 @@ def _reload(max_admitted=None, threads=None, queue_timeout=None):
     patcher.start()
     from orchestrator import concurrency
     module = importlib.reload(concurrency)
+    # The bound is sized lazily from measured p50. Under SimpleTestCase the
+    # database is unavailable, so measurement returns None and the fallback is
+    # used - which makes these tests deterministic rather than dependent on
+    # whatever query_profile happens to contain.
+    module.recompute_admission()
     return module, patcher
 
 
@@ -181,26 +186,167 @@ class AdmissionIsBoundedTests(SimpleTestCase):
         self.assertEqual(concurrency._admission._value, concurrency.MAX_ADMITTED)
 
 
-class AdmissionIsDerivedFromThreadsTests(SimpleTestCase):
+class AdmissionIsDerivedFromWhatItGovernsTests(SimpleTestCase):
+    """The bound follows the queue timeout and the measured p50, not the threads.
+
+    CHANGED SHIPPED TEST. This class previously asserted the bound was derived
+    from GUNICORN_THREADS // 3. That derivation was wrong: thread count bounds
+    how many requests can be HELD, not how many can be SERVED. With a serial
+    queue, position k waits ~(k-1) x p50, so admitting 8 against a 25 s timeout
+    and a ~40 s p50 meant 7 people held a thread for 25 s and were refused
+    anyway - the very cost the bound exists to remove, only smaller and
+    invisible.
+
+    The property PRESERVED from the old test: the bound is always strictly
+    smaller than the thread count. That margin is what keeps the fast path
+    unblockable, and it is now a ceiling on the derivation rather than the
+    derivation itself.
+    """
+
     def tearDown(self):
         from orchestrator import concurrency
         importlib.reload(concurrency)
 
-    def test_bound_is_smaller_than_the_thread_pool(self):
-        # If this ever equalled the thread count the bound would do nothing:
-        # model requests could still take every thread. The margin IS the fix.
-        for threads in (4, 12, 24, 48):
-            concurrency, patcher = _reload(threads=threads)
-            try:
-                self.assertLess(
-                    concurrency.MAX_ADMITTED, threads,
-                    f"admission {concurrency.MAX_ADMITTED} leaves no thread free at {threads}",
-                )
-                self.assertGreaterEqual(concurrency.MAX_ADMITTED, 1)
-            finally:
-                patcher.stop()
+    def test_ceil_timeout_over_p50_plus_one(self):
+        from orchestrator.concurrency import derive_max_admitted
 
-    def test_an_explicit_override_wins(self):
+        # 25 s timeout, ~40 s p50: only position 1 is servable, plus one.
+        self.assertEqual(derive_max_admitted(25, 40.0, 24), 2)
+        # 25 s timeout against the reference 87 s p50: same answer.
+        self.assertEqual(derive_max_admitted(25, 87.0, 24), 2)
+        # 120 s timeout, ~40 s p50: positions 1-3 reachable, plus one.
+        self.assertEqual(derive_max_admitted(120, 40.0, 24), 4)
+
+    def test_thread_count_remains_a_strict_ceiling(self):
+        from orchestrator.concurrency import derive_max_admitted
+
+        # A tiny p50 would derive an enormous bound; the ceiling holds it at
+        # threads - 1 so at least one thread is always free for the fast path.
+        for threads in (2, 4, 24):
+            with self.subTest(threads=threads):
+                self.assertEqual(derive_max_admitted(120, 0.5, threads), threads - 1)
+
+    def test_never_below_one(self):
+        from orchestrator.concurrency import derive_max_admitted
+
+        self.assertEqual(derive_max_admitted(1, 1000.0, 24), 2)   # ceil(0.001)+1
+        self.assertEqual(derive_max_admitted(1, 1000.0, 1), 1)    # ceiling at 1
+
+    def test_fallback_is_reported_when_nothing_is_measured(self):
+        # Under SimpleTestCase there is no database, so this is the fresh-
+        # install case: the source must SAY it is a fallback, not pass a
+        # constant off as a measurement.
+        concurrency, patcher = _reload(threads=24, queue_timeout=25)
+        self.addCleanup(patcher.stop)
+        self.assertEqual(concurrency.ADMISSION_SOURCE, "fallback")
+        self.assertEqual(concurrency.MAX_ADMITTED, 2)   # ceil(25/87)+1
+
+    def test_an_explicit_override_wins_and_is_labelled(self):
         concurrency, patcher = _reload(max_admitted=3, threads=24)
         self.addCleanup(patcher.stop)
         self.assertEqual(concurrency.MAX_ADMITTED, 3)
+        self.assertEqual(concurrency.ADMISSION_SOURCE, "override")
+
+    def test_recompute_swaps_the_bound_without_stranding_holders(self):
+        # A request that acquired the OLD semaphore must release the OLD one.
+        # Otherwise recomputing while a request is in flight would leak a
+        # ticket from the new bound, or double-release into the old.
+        concurrency, patcher = _reload(max_admitted=2, queue_timeout=30)
+        self.addCleanup(patcher.stop)
+        old_sem = concurrency._admission
+
+        held = threading.Event()
+        release = threading.Event()
+
+        def occupy():
+            with concurrency.llm_slot(label="holder"):
+                held.set()
+                release.wait(timeout=10)
+
+        t = threading.Thread(target=occupy, daemon=True)
+        t.start()
+        self.assertTrue(held.wait(timeout=5))
+        self.assertEqual(old_sem._value, 1)
+
+        # Recompute while the holder is inside. Override forces a known size.
+        with mock.patch.dict(os.environ, {"LLM_MAX_ADMITTED": "5"}):
+            concurrency.recompute_admission()
+        new_sem = concurrency._admission
+        self.assertIsNot(new_sem, old_sem)
+        self.assertEqual(new_sem._value, 5)          # untouched by the holder
+
+        release.set()
+        t.join(timeout=5)
+        self.assertEqual(old_sem._value, 2)          # released to the OLD one
+        self.assertEqual(new_sem._value, 5)          # new one never touched
+
+
+class QueuePositionTests(SimpleTestCase):
+    def tearDown(self):
+        from orchestrator import concurrency
+        importlib.reload(concurrency)
+
+    def test_position_is_one_when_nobody_is_waiting(self):
+        concurrency, patcher = _reload(max_admitted=3, queue_timeout=30)
+        self.addCleanup(patcher.stop)
+        self.assertEqual(concurrency.queue_position(), 1)
+
+    def test_position_counts_everyone_ahead(self):
+        concurrency, patcher = _reload(max_admitted=3, queue_timeout=30)
+        self.addCleanup(patcher.stop)
+
+        held = threading.Event()
+        release = threading.Event()
+
+        def occupy():
+            with concurrency.llm_slot(label="holder"):
+                held.set()
+                release.wait(timeout=10)
+
+        t = threading.Thread(target=occupy, daemon=True)
+        t.start()
+        self.assertTrue(held.wait(timeout=5))
+        # One inside (still counted in _waiting until it exits) -> next is 2nd.
+        self.assertEqual(concurrency.queue_position(), 2)
+        release.set()
+        t.join(timeout=5)
+        self.assertEqual(concurrency.queue_position(), 1)
+
+
+class FirstUseDoesNotDeadlockTests(SimpleTestCase):
+    """The very first llm_slot() of a process must return.
+
+    _get_admission() holds _admission_lock while calling recompute_admission(),
+    which takes it again. With a plain Lock that deadlocked on the FIRST model
+    request after every deploy. The other tests here never noticed because they
+    call recompute_admission() directly; the full suite noticed by hanging for
+    ten minutes. This test enters the slot on a fresh module, in a thread, with
+    a deadline - so a regression fails in seconds instead of hanging a CI run.
+    """
+
+    def tearDown(self):
+        from orchestrator import concurrency
+        importlib.reload(concurrency)
+
+    def test_lazy_initialisation_from_inside_llm_slot(self):
+        with mock.patch.dict(os.environ, {"LLM_MAX_ADMITTED": "2", "LLM_QUEUE_TIMEOUT": "30"}):
+            from orchestrator import concurrency
+            concurrency = importlib.reload(concurrency)
+            # Deliberately NOT calling recompute_admission(): the slot itself
+            # must be able to size the bound on first use.
+            self.assertIsNone(concurrency._admission)
+
+            entered = threading.Event()
+
+            def first_use():
+                with concurrency.llm_slot(label="first"):
+                    entered.set()
+
+            t = threading.Thread(target=first_use, daemon=True)
+            t.start()
+            self.assertTrue(
+                entered.wait(timeout=5),
+                "first llm_slot() never returned - the admission lock is not reentrant",
+            )
+            t.join(timeout=5)
+            self.assertEqual(concurrency.MAX_ADMITTED, 2)

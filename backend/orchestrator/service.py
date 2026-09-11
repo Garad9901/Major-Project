@@ -19,7 +19,7 @@ from web_agent.service import fetch_for_question
 from fast_path import service as fast_path_service
 from sql_agent import db as sql_db, db_mssql as sql_db_mssql, guard as sql_guard
 
-from . import cache, conversation, verification
+from . import cache, concurrency, conversation, verification
 from .concurrency import llm_slot
 from .profiling import Profile
 
@@ -739,6 +739,30 @@ def _generate_stream(question, profile=None, context=None):
     # because llm_slot is itself a context manager whose body is the entire
     # pipeline — wrapping it would time the whole request and call it "waiting".
     wait_started = profile.total_ms
+
+    # TELL THE USER WHERE THEY ARE BEFORE MAKING THEM WAIT.
+    #
+    # A 120-second wait against a blank screen is a hang. The same wait against
+    # "You're 2nd in line - about 90 seconds" is information, and it lets the
+    # person decide to give up rather than guess. This is what makes a longer
+    # LLM_QUEUE_TIMEOUT acceptable at all: the timeout was held at 25 s for as
+    # long as the wait was invisible.
+    #
+    # Position is exact under the admission bound (concurrency.queue_position),
+    # and the estimate is position-1 times the measured model-path p50 - the
+    # same figure the admission bound is sized from, so the two cannot
+    # disagree. Sent only when someone is actually ahead; position 1 waits for
+    # nothing and a "you're next" notice would just be noise.
+    position = concurrency.queue_position()
+    if position > 1:
+        p50 = concurrency.measured_model_p50_seconds() or concurrency._FALLBACK_P50_SECONDS
+        yield "stage", {
+            "stage": "queued",
+            "position": position,
+            "estimated_wait_seconds": int(round((position - 1) * p50)),
+            "queue_timeout_seconds": int(concurrency.QUEUE_TIMEOUT_SECONDS),
+        }
+
     with llm_slot(label=f"stream q={question[:40]!r}"):
         profile.add_stage("slot_wait", wait_started)
         profile.mark("slot_acquired")
