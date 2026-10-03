@@ -137,6 +137,25 @@
 		reverse_proxy backend:8000
 	}
 
+	# --- the institution's own branding --------------------------------------
+	# Served from the MOUNTED config directory, not from the built image.
+	#
+	# The logo is the customer's trademark, and this is a product sold to more
+	# than one college. Baking St. Vincent Pallotti's crest into the image would
+	# ship it to every other buyer and put it in the product repository, which
+	# is the same reason config/institution.json is gitignored rather than
+	# committed. Branding travels with the deployment, like its name and its
+	# support address.
+	#
+	# A separate matcher so a missing logo returns 404 rather than falling
+	# through to the SPA handler and serving index.html as an image - which the
+	# browser renders as a broken-image icon with no clue why.
+	handle /institution/* {
+		root * /etc/college-assistant
+		file_server
+		header Cache-Control "public, max-age=3600"
+	}
+
 	# --- the compiled single-page application --------------------------------
 	handle {
 		root * /srv

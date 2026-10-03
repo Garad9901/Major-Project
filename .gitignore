@@ -48,3 +48,10 @@ backups/
 # overwritten by an upgrade or captured in a commit.
 config/institution.json
 config/institution.json.bak
+
+# Per-deployment institution branding (logo, crest, any customer asset).
+# The customer's trademark is not part of the product. config/institution.json
+# is already excluded for the same reason: branding travels with the
+# deployment, not with the repository. config/institution.example.json and
+# config/schema_map.json ARE committed and are negated below.
+config/institution/

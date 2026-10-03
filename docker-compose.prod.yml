@@ -205,6 +205,10 @@ services:
       # so what is deployed cannot be edited in place on the server.
       - caddy_data:/data
       - caddy_config:/config
+      # The institution's branding (logo, any future per-customer asset), from
+      # the same directory the backend reads institution.json out of. READ-ONLY:
+      # the edge serves these and must never be able to alter them.
+      - ./config:/etc/college-assistant:ro
     healthcheck:
       # The caddy image does ship wget. --no-check-certificate because the cert
       # is self-signed by Caddy's internal CA; this probe only asks "is the
